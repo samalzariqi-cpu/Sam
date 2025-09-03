@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>مشغل القرآن الكريم</title>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Cairo:wght@400;700&display=swap');
+        :root {
+            --bg-color: #1a1a1a;
+            --text-color: #e0e0e0;
+            --primary-color: #00aaff;
+            --card-bg-color: #2c2c2c;
+        }
+        body {
+            font-family: 'Cairo', sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            margin: 0;
+            padding: 20px;
+            box-sizing: border-box;
+        }
+        .player-container {
+            background-color: var(--card-bg-color);
+            border-radius: 15px;
+            padding: 25px;
+            text-align: center;
+            width: 100%;
+            max-width: 400px;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+        }
+        #surah-title {
+            font-size: 2rem;
+            font-weight: 700;
+            margin-top: 0;
+            margin-bottom: 5px;
+            color: var(--primary-color);
+        }
+        #reciter-name {
+            font-size: 1.1rem;
+            margin-bottom: 20px;
+            opacity: 0.8;
+        }
+        audio {
+            width: 100%;
+            margin-top: 20px;
+            border-radius: 50px;
+        }
+        .download-button {
+            display: inline-block;
+            background-color: var(--primary-color);
+            color: #ffffff;
+            padding: 12px 25px;
+            border-radius: 50px;
+            text-decoration: none;
+            font-weight: 700;
+            margin-top: 25px;
+            transition: background-color 0.3s ease, transform 0.2s ease;
+        }
+        .download-button:hover {
+            background-color: #0088cc;
+            transform: scale(1.05);
+        }
+        .error-message {
+            color: #ff6b6b;
+            font-size: 1.2rem;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="player-container" id="container">
+        <h1 id="surah-title">جاري التحميل...</h1>
+        <p id="reciter-name"></p>
+        
+        <audio id="audio-player" controls autoplay>
+            عفواً، متصفحك لا يدعم تشغيل الصوت.
+        </audio>
+
+        <a id="download-link" class="download-button" href="#" download>تحميل السورة</a>
+    </div>
+
+    <script>
+        window.onload = function() {
+            const container = document.getElementById('container');
+            const audioPlayer = document.getElementById('audio-player');
+            const surahTitleElem = document.getElementById('surah-title');
+            const reciterNameElem = document.getElementById('reciter-name');
+            const downloadLink = document.getElementById('download-link');
+
+            try {
+                // استخلاص البيانات من رابط الصفحة
+                const params = new URLSearchParams(window.location.search);
+                const audioUrl = params.get('url');
+                const surahTitle = params.get('title');
+                const reciterName = params.get('reciter');
+
+                if (!audioUrl || !surahTitle) {
+                    throw new Error("بيانات السورة غير متوفرة في الرابط.");
+                }
+
+                // فك ترميز البيانات
+                const decodedUrl = decodeURIComponent(audioUrl);
+                const decodedTitle = decodeURIComponent(surahTitle);
+                const decodedReciter = decodeURIComponent(reciterName || 'غير محدد');
+
+                // تحديث واجهة المستخدم بالبيانات الصحيحة
+                surahTitleElem.textContent = decodedTitle;
+                reciterNameElem.textContent = `بصوت: ${decodedReciter}`;
+                audioPlayer.src = decodedUrl;
+                downloadLink.href = decodedUrl;
+                // تحديد اسم الملف عند التحميل
+                downloadLink.setAttribute('download', `${decodedTitle} - ${decodedReciter}.mp3`);
+                
+                // تشغيل الصوت تلقائياً
+                audioPlayer.play();
+
+            } catch (error) {
+                console.error("Error setting up player:", error);
+                container.innerHTML = `<p class="error-message">حدث خطأ أثناء تحميل بيانات السورة. الرجاء العودة إلى البوت والمحاولة مرة أخرى.</p>`;
+            }
+        };
+    </script>
+
+</body>
+</html>
