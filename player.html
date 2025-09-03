@@ -50,21 +50,6 @@
             margin-top: 20px;
             border-radius: 50px;
         }
-        .download-button {
-            display: inline-block;
-            background-color: var(--primary-color);
-            color: #ffffff;
-            padding: 12px 25px;
-            border-radius: 50px;
-            text-decoration: none;
-            font-weight: 700;
-            margin-top: 25px;
-            transition: background-color 0.3s ease, transform 0.2s ease;
-        }
-        .download-button:hover {
-            background-color: #0088cc;
-            transform: scale(1.05);
-        }
         .error-message {
             color: #ff6b6b;
             font-size: 1.2rem;
@@ -81,7 +66,6 @@
             عفواً، متصفحك لا يدعم تشغيل الصوت.
         </audio>
 
-        <a id="download-link" class="download-button" href="#" download>تحميل السورة</a>
     </div>
 
     <script>
@@ -90,7 +74,6 @@
             const audioPlayer = document.getElementById('audio-player');
             const surahTitleElem = document.getElementById('surah-title');
             const reciterNameElem = document.getElementById('reciter-name');
-            const downloadLink = document.getElementById('download-link');
 
             try {
                 // استخلاص البيانات من رابط الصفحة
@@ -112,9 +95,6 @@
                 surahTitleElem.textContent = decodedTitle;
                 reciterNameElem.textContent = `بصوت: ${decodedReciter}`;
                 audioPlayer.src = decodedUrl;
-                downloadLink.href = decodedUrl;
-                // تحديد اسم الملف عند التحميل
-                downloadLink.setAttribute('download', `${decodedTitle} - ${decodedReciter}.mp3`);
                 
                 // تشغيل الصوت تلقائياً
                 audioPlayer.play();
