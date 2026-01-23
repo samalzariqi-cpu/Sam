@@ -1,4 +1,6 @@
-python-telegram-bot
+
 aiosqlite
 flask
 gunicorn
+python-telegram-bot[job-queue]
+
