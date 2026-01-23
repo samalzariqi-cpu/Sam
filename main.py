@@ -1,1742 +1,2117 @@
-import logging
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes, PreCheckoutQueryHandler, ConversationHandler
-from datetime import datetime, timedelta
-import sqlite3
-import random
-import re
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+🎯 بوت مسابقات تلجرام المتقدم - ملف واحد شامل
+يحتوي على 3 أنواع مسابقات:
+1. مسابقة التصويت (Voting Contest)
+2. عجلة الحظ (Lucky Wheel)
+3. مسابقة الإحالات (Referral Contest)
 
-# إعداد التسجيل
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+المتطلبات:
+pip install python-telegram-bot==20.7 aiosqlite
+
+طريقة التشغيل:
+1. ضع التوكن الخاص بك في TELEGRAM_BOT_TOKEN
+2. ضع معرف قناتك الرسمية في OFFICIAL_CHANNEL
+3. شغل البوت: python config.py
+"""
+
+import asyncio
+import logging
+import random
+import time
+from datetime import datetime, timedelta
+from typing import Dict, List, Optional, Set, Tuple
+import json
+import aiosqlite
+from telegram import (
+    Update, InlineKeyboardButton, InlineKeyboardMarkup,
+    ChatMember
+)
+from telegram.ext import (
+    Application, CommandHandler, CallbackQueryHandler,
+    ContextTypes, MessageHandler, filters
+)
+from telegram.error import TelegramError
+
+# التوافق مع الإصدارات المختلفة
+try:
+    from telegram.constants import ParseMode
+except ImportError:
+    # للإصدارات القديمة
+    class ParseMode:
+        MARKDOWN = "Markdown"
+        MARKDOWN_V2 = "MarkdownV2"
+        HTML = "HTML"
+
+# التوافق مع ChatMemberStatus
+try:
+    from telegram import ChatMemberStatus
+except ImportError:
+    # للإصدارات القديمة
+    class ChatMemberStatus:
+        MEMBER = "member"
+        ADMINISTRATOR = "administrator"
+        OWNER = "creator"
+        LEFT = "left"
+        KICKED = "kicked"
+
+# ═══════════════════════════════════════════════════════════════
+# ⚙️ الإعدادات الأساسية
+# ═══════════════════════════════════════════════════════════════
+
+# ضع توكن البوت هنا
+TELEGRAM_BOT_TOKEN = "8415034792:AAHuEHGs3CaNMq3KtUWNEKmqTljJ3jFc_mM"
+
+# معرف قناتك الرسمية (بدون @)
+OFFICIAL_CHANNEL = "@WhatIOwnQBot1"
+
+# اسم قاعدة البيانات
+DATABASE_NAME = "contests.db"
+
+# فترة التحقق من الاشتراك (بالساعات)
+CHECK_SUBSCRIPTION_INTERVAL = 3
+
+# تفعيل السجلات
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
 logger = logging.getLogger(__name__)
 
-# معلومات البوت
-TOKEN = '7606432428:AAFvvtU6WjmaByateXKb3QQz-vFYbsXZ4lE'
-ADMIN_ID = 1058616316
+# ═══════════════════════════════════════════════════════════════
+# 🗄️ قاعدة البيانات
+# ═══════════════════════════════════════════════════════════════
 
-# حالات المحادثة
-WAITING_TRANSFER_AMOUNT, WAITING_TRANSFER_ID, WAITING_PRODUCT_NAME, WAITING_PRODUCT_PRICE, WAITING_PRODUCT_CONTENT, WAITING_BROADCAST, WAITING_CHANNEL, WAITING_GIFT_CODE_POINTS, WAITING_GIFT_CODE_USES, WAITING_STARS_AMOUNT = range(10)
-
-# إعداد قاعدة البيانات
-def init_db():
-    conn = sqlite3.connect('points_bot.db')
-    c = conn.cursor()
+class Database:
+    """إدارة قاعدة البيانات SQLite"""
     
-    # جدول المستخدمين
-    c.execute('''CREATE TABLE IF NOT EXISTS users
-                 (user_id INTEGER PRIMARY KEY, username TEXT, points INTEGER DEFAULT 0, 
-                  referrer_id INTEGER, join_date TEXT, last_gift_date TEXT)''')
+    def __init__(self, db_name: str):
+        self.db_name = db_name
     
-    # جدول المنتجات
-    c.execute('''CREATE TABLE IF NOT EXISTS products
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, price INTEGER, 
-                  content_type TEXT, content TEXT)''')
+    async def init_db(self):
+        """إنشاء الجداول الأساسية"""
+        async with aiosqlite.connect(self.db_name) as db:
+            # جدول المسابقات
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS contests (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    owner_id INTEGER NOT NULL,
+                    channel_id TEXT NOT NULL,
+                    contest_type TEXT NOT NULL,
+                    status TEXT DEFAULT 'active',
+                    settings TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    ended_at TIMESTAMP
+                )
+            ''')
+            
+            # جدول المتسابقين في مسابقة التصويت
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS voting_participants (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    contest_id INTEGER,
+                    name TEXT NOT NULL,
+                    message_id INTEGER,
+                    votes INTEGER DEFAULT 0,
+                    FOREIGN KEY(contest_id) REFERENCES contests(id)
+                )
+            ''')
+            
+            # جدول الأصوات
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS votes (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    participant_id INTEGER,
+                    user_id INTEGER,
+                    voted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(participant_id) REFERENCES voting_participants(id)
+                )
+            ''')
+            
+            # جدول المشتركين في عجلة الحظ
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS lucky_participants (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    contest_id INTEGER,
+                    user_id INTEGER,
+                    username TEXT,
+                    joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(contest_id) REFERENCES contests(id)
+                )
+            ''')
+            
+            # حذف الجدول القديم إذا كان موجوداً بالقيد الخاطئ
+            try:
+                # محاولة التحقق من البنية
+                async with db.execute("PRAGMA table_info(referral_participants)") as cursor:
+                    columns = await cursor.fetchall()
+                    # التحقق إذا كان user_id لديه قيد UNIQUE خاطئ
+                    needs_recreation = False
+                    async with db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='referral_participants'") as cursor:
+                        result = await cursor.fetchone()
+                        if result and 'user_id INTEGER UNIQUE' in result[0]:
+                            needs_recreation = True
+                    
+                    if needs_recreation:
+                        # نسخ البيانات القديمة
+                        await db.execute('''
+                            CREATE TABLE IF NOT EXISTS referral_participants_backup AS 
+                            SELECT * FROM referral_participants
+                        ''')
+                        
+                        # حذف الجدول القديم
+                        await db.execute('DROP TABLE IF EXISTS referral_participants')
+            except:
+                pass
+            
+            # جدول مسابقة الإحالات
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS referral_participants (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    contest_id INTEGER,
+                    user_id INTEGER,
+                    username TEXT,
+                    referral_code TEXT UNIQUE,
+                    referred_by INTEGER,
+                    referral_count INTEGER DEFAULT 0,
+                    message_id INTEGER,
+                    joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(contest_id, user_id),
+                    FOREIGN KEY(contest_id) REFERENCES contests(id)
+                )
+            ''')
+            
+            # محاولة استرجاع البيانات القديمة
+            try:
+                async with db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='referral_participants_backup'") as cursor:
+                    if await cursor.fetchone():
+                        await db.execute('''
+                            INSERT OR IGNORE INTO referral_participants 
+                            SELECT * FROM referral_participants_backup
+                        ''')
+                        await db.execute('DROP TABLE referral_participants_backup')
+            except:
+                pass
+            
+            # جدول التحقق من الاشتراك
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS subscription_checks (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER,
+                    channel_id TEXT,
+                    is_subscribed INTEGER DEFAULT 1,
+                    last_check TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            
+            await db.commit()
     
-    # جدول الإعدادات
-    c.execute('''CREATE TABLE IF NOT EXISTS settings
-                 (key TEXT PRIMARY KEY, value TEXT)''')
+    async def create_contest(self, owner_id: int, channel_id: str, 
+                           contest_type: str, settings: dict) -> int:
+        """إنشاء مسابقة جديدة"""
+        async with aiosqlite.connect(self.db_name) as db:
+            cursor = await db.execute('''
+                INSERT INTO contests (owner_id, channel_id, contest_type, settings)
+                VALUES (?, ?, ?, ?)
+            ''', (owner_id, channel_id, contest_type, json.dumps(settings)))
+            await db.commit()
+            return cursor.lastrowid
     
-    # جدول القنوات الإجبارية
-    c.execute('''CREATE TABLE IF NOT EXISTS channels
-                 (channel_id TEXT PRIMARY KEY, channel_username TEXT)''')
+    async def get_contest(self, contest_id: int) -> Optional[dict]:
+        """الحصول على معلومات مسابقة"""
+        async with aiosqlite.connect(self.db_name) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                'SELECT * FROM contests WHERE id = ?', (contest_id,)
+            ) as cursor:
+                row = await cursor.fetchone()
+                if row:
+                    return dict(row)
+                return None
     
-    # جدول أكواد الهدايا
-    c.execute('''CREATE TABLE IF NOT EXISTS gift_codes
-                 (code TEXT PRIMARY KEY, points INTEGER, max_uses INTEGER, 
-                  used_count INTEGER DEFAULT 0)''')
+    async def get_active_contests_by_owner(self, owner_id: int) -> List[dict]:
+        """الحصول على جميع المسابقات النشطة للمستخدم"""
+        async with aiosqlite.connect(self.db_name) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute('''
+                SELECT * FROM contests 
+                WHERE owner_id = ? AND status = 'active'
+            ''', (owner_id,)) as cursor:
+                return [dict(row) for row in await cursor.fetchall()]
     
-    # جدول استخدامات الأكواد
-    c.execute('''CREATE TABLE IF NOT EXISTS code_users
-                 (code TEXT, user_id INTEGER, PRIMARY KEY (code, user_id))''')
-    
-    # جدول سجل المعاملات
-    c.execute('''CREATE TABLE IF NOT EXISTS transactions
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, 
-                  type TEXT, amount INTEGER, description TEXT, date TEXT)''')
-    
-    # جدول طلبات الاسترداد
-    c.execute('''CREATE TABLE IF NOT EXISTS refund_requests
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT, 
-                  user_id INTEGER, 
-                  charge_id TEXT, 
-                  created_at TEXT)''')
-    
-    # الإعدادات الافتراضية
-    default_settings = {
-        'welcome_message': '👋 مرحباً بك في بوت تجميع النقاط!\n\n💎 اجمع النقاط واستبدلها بمنتجات رائعة',
-        'referral_points': '1',
-        'transfer_fee': '10',
-        'daily_gift_points': '1',
-        'daily_gift_mode': 'fixed',
-        'daily_gift_min': '0',
-        'daily_gift_max': '100',
-        'stars_ratio': '3',
-        'bot_status': 'active'
-    }
-    
-    for key, value in default_settings.items():
-        c.execute('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)', (key, value))
-    
-    conn.commit()
-    conn.close()
+    async def end_contest(self, contest_id: int):
+        """إنهاء المسابقة"""
+        async with aiosqlite.connect(self.db_name) as db:
+            await db.execute('''
+                UPDATE contests 
+                SET status = 'ended', ended_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+            ''', (contest_id,))
+            await db.commit()
 
-# دوال قاعدة البيانات
-def get_setting(key):
-    conn = sqlite3.connect('points_bot.db')
-    c = conn.cursor()
-    c.execute('SELECT value FROM settings WHERE key = ?', (key,))
-    result = c.fetchone()
-    conn.close()
-    return result[0] if result else None
+# ═══════════════════════════════════════════════════════════════
+# 🔍 وظائف التحقق من الاشتراك
+# ═══════════════════════════════════════════════════════════════
 
-def set_setting(key, value):
-    conn = sqlite3.connect('points_bot.db')
-    c = conn.cursor()
-    c.execute('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', (key, value))
-    conn.commit()
-    conn.close()
+async def check_user_subscription(
+    context: ContextTypes.DEFAULT_TYPE,
+    user_id: int,
+    channel_id: str
+) -> bool:
+    """التحقق من اشتراك المستخدم في القناة"""
+    try:
+        # إزالة @ إذا كان موجوداً
+        clean_channel_id = channel_id.replace('@', '')
+        
+        # محاولة مع @
+        try:
+            member = await context.bot.get_chat_member(f"@{clean_channel_id}", user_id)
+            return member.status in [
+                ChatMemberStatus.MEMBER,
+                ChatMemberStatus.ADMINISTRATOR,
+                ChatMemberStatus.OWNER
+            ]
+        except TelegramError as e:
+            # إذا فشل، جرب بدون @
+            if 'Chat not found' in str(e) or 'Bad Request' in str(e):
+                try:
+                    member = await context.bot.get_chat_member(clean_channel_id, user_id)
+                    return member.status in [
+                        ChatMemberStatus.MEMBER,
+                        ChatMemberStatus.ADMINISTRATOR,
+                        ChatMemberStatus.OWNER
+                    ]
+                except TelegramError:
+                    return False
+            return False
+    except Exception:
+        return False
 
-def get_user(user_id):
-    conn = sqlite3.connect('points_bot.db')
-    c = conn.cursor()
-    c.execute('SELECT * FROM users WHERE user_id = ?', (user_id,))
-    user = c.fetchone()
-    conn.close()
-    return user
-
-def add_user(user_id, username, referrer_id=None):
-    conn = sqlite3.connect('points_bot.db')
-    c = conn.cursor()
-    join_date = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    c.execute('INSERT OR IGNORE INTO users (user_id, username, referrer_id, join_date) VALUES (?, ?, ?, ?)',
-              (user_id, username, referrer_id, join_date))
-    conn.commit()
-    conn.close()
-
-def update_points(user_id, points):
-    conn = sqlite3.connect('points_bot.db')
-    c = conn.cursor()
-    c.execute('UPDATE users SET points = points + ? WHERE user_id = ?', (points, user_id))
-    conn.commit()
-    conn.close()
-
-def add_transaction(user_id, trans_type, amount, description):
-    conn = sqlite3.connect('points_bot.db')
-    c = conn.cursor()
-    date = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    c.execute('INSERT INTO transactions (user_id, type, amount, description, date) VALUES (?, ?, ?, ?, ?)',
-              (user_id, trans_type, amount, description, date))
-    conn.commit()
-    conn.close()
-
-def get_products():
-    conn = sqlite3.connect('points_bot.db')
-    c = conn.cursor()
-    c.execute('SELECT * FROM products ORDER BY price')
-    products = c.fetchall()
-    conn.close()
-    return products
-
-def add_product(name, price, content_type, content):
-    conn = sqlite3.connect('points_bot.db')
-    c = conn.cursor()
-    c.execute('INSERT INTO products (name, price, content_type, content) VALUES (?, ?, ?, ?)',
-              (name, price, content_type, content))
-    conn.commit()
-    conn.close()
-
-def delete_product(product_id):
-    conn = sqlite3.connect('points_bot.db')
-    c = conn.cursor()
-    c.execute('DELETE FROM products WHERE id = ?', (product_id,))
-    conn.commit()
-    conn.close()
-
-def get_channels():
-    conn = sqlite3.connect('points_bot.db')
-    c = conn.cursor()
-    c.execute('SELECT * FROM channels')
-    channels = c.fetchall()
-    conn.close()
-    return channels
-
-def add_channel(channel_id, channel_username):
-    conn = sqlite3.connect('points_bot.db')
-    c = conn.cursor()
-    c.execute('INSERT OR REPLACE INTO channels (channel_id, channel_username) VALUES (?, ?)',
-              (channel_id, channel_username))
-    conn.commit()
-    conn.close()
-
-def remove_channel(channel_id):
-    conn = sqlite3.connect('points_bot.db')
-    c = conn.cursor()
-    c.execute('DELETE FROM channels WHERE channel_id = ?', (channel_id,))
-    conn.commit()
-    conn.close()
-
-# دالة التحقق من الاشتراك
-async def check_subscription(user_id, context):
-    channels = get_channels()
-    if not channels:
-        return True
+async def check_multiple_subscriptions(
+    context: ContextTypes.DEFAULT_TYPE,
+    user_id: int,
+    channels: List[str]
+) -> Tuple[bool, List[str]]:
+    """التحقق من اشتراك المستخدم في عدة قنوات"""
+    not_subscribed = []
     
     for channel in channels:
-        try:
-            member = await context.bot.get_chat_member(channel[0], user_id)
-            if member.status in ['left', 'kicked']:
-                return False
-        except:
-            pass
-    return True
-
-# دالة حساب الهدية اليومية
-def calculate_daily_gift():
-    mode = get_setting('daily_gift_mode')
-    if mode == 'fixed':
-        return int(get_setting('daily_gift_points'))
-    else:
-        min_points = int(get_setting('daily_gift_min'))
-        max_points = int(get_setting('daily_gift_max'))
-        
-        # نظام الحظ
-        rand = random.random()
-        if rand < 0.80:
-            return random.randint(min(min_points, 10), min(10, max_points))
-        elif rand < 0.95:
-            return random.randint(max(min_points, 11), min(20, max_points))
-        elif rand < 0.98:
-            return random.randint(max(min_points, 21), min(30, max_points))
-        else:
-            return random.randint(max(min_points, 31), max_points)
-
-# الأزرار الرئيسية
-def main_keyboard(user_id=None):
-    keyboard = [
-        [InlineKeyboardButton("🔥 المتجر - العروض 🔥", callback_data='shop')],
-        [InlineKeyboardButton("💰 رصيدي", callback_data='my_points'),
-         InlineKeyboardButton("🎁 هدية يومية", callback_data='daily_gift')],
-        [InlineKeyboardButton("💸 تحويل نقاط", callback_data='transfer'),
-         InlineKeyboardButton("⭐ شراء نقاط", callback_data='buy_stars')],
-        [InlineKeyboardButton("👥 دعوة أصدقاء", callback_data='referral'),
-         InlineKeyboardButton("📊 سجل المعاملات", callback_data='transactions')]
-    ]
-    
-    if user_id == ADMIN_ID:
-        keyboard.append([InlineKeyboardButton("🎛️ لوحة التحكم", callback_data='admin_panel')])
-    
-    return InlineKeyboardMarkup(keyboard)
-
-def admin_keyboard():
-    keyboard = [
-        [InlineKeyboardButton("📊 الإحصائيات", callback_data='admin_stats')],
-        [InlineKeyboardButton("⚙️ الإعدادات", callback_data='admin_settings')],
-        [InlineKeyboardButton("➕ إضافة منتج", callback_data='add_product')],
-        [InlineKeyboardButton("🗑️ حذف منتج", callback_data='delete_product')],
-        [InlineKeyboardButton("📢 إذاعة", callback_data='broadcast')],
-        [InlineKeyboardButton("📺 إدارة القنوات", callback_data='manage_channels')],
-        [InlineKeyboardButton("🎫 إنشاء كود هدية", callback_data='create_gift_code')],
-        [InlineKeyboardButton("🔄 حالة البوت", callback_data='toggle_bot_status')],
-        [InlineKeyboardButton("🔙 رجوع", callback_data='back_to_main')]
-    ]
-    return InlineKeyboardMarkup(keyboard)
-
-# أمر البدء
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    user_id = user.id
-    username = user.username or user.first_name
-    
-    bot_status = get_setting('bot_status')
-    
-    referrer_id = None
-    gift_code = None
-    
-    if context.args:
-        arg = context.args[0]
-        if arg.startswith('ref'):
-            try:
-                referrer_id = int(arg[3:])
-            except:
-                pass
-        elif arg.startswith('gift'):
-            gift_code = arg[4:]
-    
-    existing_user = get_user(user_id)
-    
-    if not existing_user:
-        add_user(user_id, username, referrer_id)
-        
-        if referrer_id and referrer_id != user_id:
-            is_subscribed = await check_subscription(user_id, context)
-            if is_subscribed:
-                referral_points = int(get_setting('referral_points'))
-                update_points(referrer_id, referral_points)
-                add_transaction(referrer_id, 'referral', referral_points, f'دعوة {username}')
-                try:
-                    await context.bot.send_message(
-                        referrer_id,
-                        f"🎉 تهانينا! حصلت على {referral_points} نقطة من دعوة {username}"
-                    )
-                except:
-                    pass
-    
-    if gift_code:
-        conn = sqlite3.connect('points_bot.db')
-        c = conn.cursor()
-        
-        c.execute('SELECT * FROM gift_codes WHERE code = ?', (gift_code,))
-        code_data = c.fetchone()
-        
-        if code_data and code_data[3] < code_data[2]:
-            c.execute('SELECT * FROM code_users WHERE code = ? AND user_id = ?', (gift_code, user_id))
-            used_before = c.fetchone()
+        # تجاهل القنوات الفارغة
+        if not channel or channel.strip() == '':
+            continue
             
-            if not used_before:
-                update_points(user_id, code_data[1])
-                add_transaction(user_id, 'gift_code', code_data[1], f'كود هدية: {gift_code}')
-                
-                c.execute('UPDATE gift_codes SET used_count = used_count + 1 WHERE code = ?', (gift_code,))
-                c.execute('INSERT INTO code_users (code, user_id) VALUES (?, ?)', (gift_code, user_id))
-                conn.commit()
-                
-                await update.message.reply_text(
-                    f"🎁 تهانينا! حصلت على {code_data[1]} نقطة من كود الهدية!"
-                )
-            else:
-                await update.message.reply_text("⚠️ لقد استخدمت هذا الكود من قبل!")
-        elif code_data:
-            await update.message.reply_text("⚠️ هذا الكود انتهى!")
-        else:
-            await update.message.reply_text("❌ كود غير صحيح!")
-        
-        conn.close()
+        is_subscribed = await check_user_subscription(context, user_id, channel)
+        if not is_subscribed:
+            not_subscribed.append(channel)
     
-    if not await check_subscription(user_id, context):
-        channels = get_channels()
-        keyboard = []
-        for channel in channels:
-            keyboard.append([InlineKeyboardButton(f"📢 اشترك في القناة", url=f"https://t.me/{channel[1]}")])
-        keyboard.append([InlineKeyboardButton("✅ تحقق من الاشتراك", callback_data='check_subscription')])
-        
-        await update.message.reply_text(
-            "⚠️ يجب عليك الاشتراك في القنوات التالية أولاً:",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-        return
-    
-    if bot_status == 'maintenance' and user_id != ADMIN_ID:
-        await update.message.reply_text(
-            "🔧 البوت في وضع الصيانة حالياً\n\n"
-            "سوف يتم إخبارك عند انتهاء الصيانة. شكراً لصبرك! 🙏"
-        )
-        return
-    
-    welcome_message = get_setting('welcome_message')
-    await update.message.reply_text(welcome_message, reply_markup=main_keyboard(user_id))
+    return len(not_subscribed) == 0, not_subscribed
 
-# معالجة الأزرار
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
+# ═══════════════════════════════════════════════════════════════
+# 🗳️ مسابقة التصويت (Voting Contest)
+# ═══════════════════════════════════════════════════════════════
+
+class VotingContest:
+    """إدارة مسابقة التصويت"""
     
-    user_id = query.from_user.id
-    bot_status = get_setting('bot_status')
+    def __init__(self, db: Database):
+        self.db = db
     
-    if user_id != ADMIN_ID and bot_status == 'maintenance':
-        if query.data != 'check_subscription':
-            await query.message.reply_text(
-                "🔧 البوت في وضع الصيانة حالياً\n\n"
-                "سوف يتم إخبارك عند انتهاء الصيانة. شكراً لصبرك! 🙏"
-            )
-            return
-    
-    if query.data == 'my_points':
-        user = get_user(user_id)
-        points = user[2] if user else 0
-        username = query.from_user.username or query.from_user.first_name
-        
-        conn = sqlite3.connect('points_bot.db')
-        c = conn.cursor()
-        c.execute('SELECT COUNT(*) FROM users WHERE referrer_id = ?', (user_id,))
-        referrals = c.fetchone()[0]
-        conn.close()
-        
-        await query.edit_message_text(
-            f"👤 المستخدم: {username}\n"
-            f"🆔 ID: `{user_id}`\n"
-            f"💰 رصيدك الحالي: {points} نقطة\n"
-            f"👥 عدد دعواتك: {referrals}",
-            parse_mode='Markdown',
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data='back_to_main')]])
+    async def create(self, owner_id: int, channel_id: str, 
+                    participants: List[str]) -> int:
+        """إنشاء مسابقة تصويت"""
+        settings = {
+            'check_interval_hours': CHECK_SUBSCRIPTION_INTERVAL
+        }
+        contest_id = await self.db.create_contest(
+            owner_id, channel_id, 'voting', settings
         )
+        
+        # إضافة المتسابقين إذا كانوا موجودين
+        if participants:
+            async with aiosqlite.connect(self.db.db_name) as db:
+                for name in participants:
+                    await db.execute('''
+                        INSERT INTO voting_participants (contest_id, name)
+                        VALUES (?, ?)
+                    ''', (contest_id, name))
+                await db.commit()
+        
+        return contest_id
     
-    elif query.data == 'daily_gift':
-        user = get_user(user_id)
-        if not user:
-            await query.message.reply_text("❌ حدث خطأ!")
-            return
+    async def publish_participants(
+        self,
+        context: ContextTypes.DEFAULT_TYPE,
+        contest_id: int,
+        channel_id: str
+    ):
+        """نشر المتسابقين في القناة"""
+        async with aiosqlite.connect(self.db.db_name) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute('''
+                SELECT * FROM voting_participants WHERE contest_id = ?
+            ''', (contest_id,)) as cursor:
+                participants = await cursor.fetchall()
         
-        last_gift = user[5]
-        today = datetime.now().strftime('%Y-%m-%d')
-        
-        if last_gift == today:
-            await query.answer("⚠️ لقد استلمت هديتك اليوم! ارجع غداً 🎁", show_alert=True)
-            return
-        
-        gift_points = calculate_daily_gift()
-        update_points(user_id, gift_points)
-        add_transaction(user_id, 'gift', gift_points, 'هدية يومية')
-        
-        conn = sqlite3.connect('points_bot.db')
-        c = conn.cursor()
-        c.execute('UPDATE users SET last_gift_date = ? WHERE user_id = ?', (today, user_id))
-        conn.commit()
-        conn.close()
-        
-        await query.edit_message_text(
-            f"🎁 تهانينا! حصلت على {gift_points} نقطة!\n\n"
-            f"💰 رصيدك الجديد: {user[2] + gift_points} نقطة",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data='back_to_main')]])
-        )
-    
-    elif query.data == 'shop' or query.data.startswith('shop_page_'):
-        products = get_products()
-        if not products:
-            await query.edit_message_text(
-                "🛒 المتجر فارغ حالياً",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data='back_to_main')]])
+        for participant in participants:
+            keyboard = [[
+                InlineKeyboardButton(
+                    "❤️ صوّت", 
+                    callback_data=f"vote_{participant['id']}"
+                )
+            ]]
+            
+            message = await context.bot.send_message(
+                chat_id=channel_id,
+                text=f"🎯 المتسابق: {participant['name']}\n\n"
+                     f"❤️ عدد الأصوات: 0",
+                reply_markup=InlineKeyboardMarkup(keyboard)
             )
+            
+            # حفظ معرف الرسالة
+            async with aiosqlite.connect(self.db.db_name) as db:
+                await db.execute('''
+                    UPDATE voting_participants 
+                    SET message_id = ? 
+                    WHERE id = ?
+                ''', (message.message_id, participant['id']))
+                await db.commit()
+    
+    async def handle_vote(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE
+    ):
+        """معالجة التصويت"""
+        query = update.callback_query
+        
+        participant_id = int(query.data.split('_')[1])
+        user_id = query.from_user.id
+        
+        # الحصول على معلومات المسابقة
+        async with aiosqlite.connect(self.db.db_name) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute('''
+                SELECT vp.*, c.channel_id, c.status
+                FROM voting_participants vp
+                JOIN contests c ON vp.contest_id = c.id
+                WHERE vp.id = ?
+            ''', (participant_id,)) as cursor:
+                participant = await cursor.fetchone()
+        
+        if not participant or participant['status'] != 'active':
+            await query.answer("❌ المسابقة منتهية!", show_alert=True)
             return
         
-        user = get_user(user_id)
-        user_points = user[2] if user else 0
+        channel_id = participant['channel_id']
         
-        current_page = 0
-        if query.data.startswith('shop_page_'):
-            current_page = int(query.data.split('_')[2])
+        # التحقق من الاشتراك في القناتين
+        channels_to_check = [OFFICIAL_CHANNEL, channel_id]
+        not_subscribed = []
         
-        items_per_page = 11
-        total_pages = (len(products) - 1) // items_per_page + 1
+        for channel in channels_to_check:
+            is_subscribed = await check_user_subscription(context, user_id, channel)
+            if not is_subscribed:
+                not_subscribed.append(channel)
         
-        start_idx = current_page * items_per_page
-        end_idx = min(start_idx + items_per_page, len(products))
-        page_products = products[start_idx:end_idx]
-        
-        keyboard = []
-        
-        keyboard.append([
-            InlineKeyboardButton("🔍 بحث", callback_data='search_product'),
-            InlineKeyboardButton("💰 حسب نقاطي", callback_data='shop_by_points')
-        ])
-        
-        for product in page_products:
-            name = product[1][:25] + ".." if len(product[1]) > 25 else product[1]
+        if not_subscribed:
+            # إنشاء أزرار الاشتراك
+            keyboard = []
+            for channel in not_subscribed:
+                keyboard.append([
+                    InlineKeyboardButton(
+                        f"📢 اشترك في {channel}",
+                        url=f"https://t.me/{channel.replace('@', '')}"
+                    )
+                ])
             
             keyboard.append([
-                InlineKeyboardButton(f"{name}", callback_data=f'buy_{product[0]}'),
-                InlineKeyboardButton(f"💵{product[2]}", callback_data=f'buy_{product[0]}')
+                InlineKeyboardButton(
+                    "✅ تحقق من الاشتراك",
+                    callback_data=f"check_vote_{participant_id}"
+                )
             ])
-        
-        nav_buttons = []
-        if current_page > 0:
-            nav_buttons.append(InlineKeyboardButton("⏮ السابق", callback_data=f'shop_page_{current_page - 1}'))
-        if current_page < total_pages - 1:
-            nav_buttons.append(InlineKeyboardButton("التالي ⏭", callback_data=f'shop_page_{current_page + 1}'))
-        
-        if nav_buttons:
-            keyboard.append(nav_buttons)
-        
-        keyboard.append([InlineKeyboardButton("🔙 رجوع", callback_data='back_to_main')])
-        
-        await query.edit_message_text(
-            f"🔥 العروض التي يقدمها البوت 🔥\n\n"
-            f"━━━━━━━━━━━━━━━\n"
-            f"💰 رصيدك: {user_points} نقطة\n"
-            f"📦 المنتجات: {len(products)}\n"
-            f"📄 الصفحة: {current_page + 1}/{total_pages}\n"
-            f"━━━━━━━━━━━━━━━\n\n"
-            "- العروض التي يمكنك شرائها -",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-    
-    elif query.data == 'search_product':
-        context.user_data['state'] = 'search_product'
-        await query.edit_message_text(
-            "🔍 أرسل اسم المنتج للبحث:",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ إلغاء", callback_data='shop')]])
-        )
-    
-    elif query.data == 'transactions':
-        conn = sqlite3.connect('points_bot.db')
-        c = conn.cursor()
-        c.execute('SELECT * FROM transactions WHERE user_id = ? ORDER BY id DESC LIMIT 10', (user_id,))
-        transactions = c.fetchall()
-        conn.close()
-        
-        if not transactions:
-            await query.edit_message_text(
-                "📊 لا توجد معاملات بعد!",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data='back_to_main')]])
-            )
-            return
-        
-        text = "📊 آخر 10 معاملات:\n\n"
-        for trans in transactions:
-            emoji = "➕" if trans[3] > 0 else "➖"
-            text += f"{emoji} {abs(trans[3])} نقطة - {trans[4]}\n📅 {trans[5]}\n\n"
-        
-        await query.edit_message_text(
-            text,
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data='back_to_main')]])
-        )
-    
-    elif query.data == 'shop_by_points':
-        user = get_user(user_id)
-        user_points = user[2] if user else 0
-        
-        products = get_products()
-        affordable = [p for p in products if p[2] <= user_points]
-        
-        if not affordable:
-            await query.answer("❌ لا توجد منتجات يمكنك شراؤها حالياً", show_alert=True)
-            return
-        
-        keyboard = []
-        for product in affordable:
-            keyboard.append([InlineKeyboardButton(
-                f"✅ {product[1]} - {product[2]} نقطة",
-                callback_data=f'buy_{product[0]}'
-            )])
-        keyboard.append([InlineKeyboardButton("🔙 رجوع للمتجر", callback_data='shop')])
-        
-        await query.edit_message_text(
-            f"🛒 المنتجات المتاحة لك\n💰 رصيدك: {user_points} نقطة\n\n"
-            f"عدد المنتجات: {len(affordable)}",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-    
-    elif query.data.startswith('buy_stars_'):
-        if query.data == 'buy_stars_custom':
-            context.user_data['state'] = 'buy_stars'
-            stars_ratio = int(get_setting('stars_ratio'))
-            await query.edit_message_text(
-                f"⭐ كل نجمة = {stars_ratio} نقطة\n\n"
-                "أرسل عدد النجوم التي تريد شراءها:",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ إلغاء", callback_data='buy_stars')]])
-            )
-            return WAITING_STARS_AMOUNT
-        else:
-            stars = int(query.data.split('_')[2])
-            stars_ratio = int(get_setting('stars_ratio'))
-            points = stars * stars_ratio
             
-            try:
-                invoice_link = await context.bot.create_invoice_link(
-                    title=f"شراء {points} نقطة",
-                    description=f"احصل على {points} نقطة مقابل {stars} نجمة",
-                    payload=f"stars_{user_id}_{points}",
-                    provider_token="",
-                    currency="XTR",
-                    prices=[LabeledPrice("نقاط", stars)]
-                )
-                
-                await query.edit_message_text(
-                    f"⭐ رابط الدفع جاهز!\n\n"
-                    f"💫 النجوم: {stars}\n"
-                    f"💎 النقاط: {points}\n\n"
-                    f"🔗 اضغط على الرابط:\n{invoice_link}",
-                    reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("🔙 رجوع للباقات", callback_data='buy_stars')],
-                        [InlineKeyboardButton("🏠 القائمة الرئيسية", callback_data='back_to_main')]
-                    ])
-                )
-            except Exception as e:
-                await query.answer(f"❌ خطأ: {str(e)}", show_alert=True)
-    
-    elif query.data.startswith('buy_') and not query.data.startswith('buy_stars'):
-        try:
-            product_id = int(query.data.split('_')[1])
-        except ValueError:
-            return
-        
-        conn = sqlite3.connect('points_bot.db')
-        c = conn.cursor()
-        c.execute('SELECT * FROM products WHERE id = ?', (product_id,))
-        product = c.fetchone()
-        conn.close()
-        
-        if not product:
-            await query.answer("❌ المنتج غير موجود!", show_alert=True)
-            return
-        
-        user = get_user(user_id)
-        
-        keyboard = []
-        if user[2] >= product[2]:
-            keyboard.append([InlineKeyboardButton("✅ تأكيد الشراء", callback_data=f'confirm_buy_{product_id}')])
-        keyboard.append([InlineKeyboardButton("🔙 رجوع للمتجر", callback_data='shop')])
-        
-        status = "✅ يمكنك الشراء" if user[2] >= product[2] else "❌ رصيدك غير كافي"
-        
-        await query.edit_message_text(
-            f"🛍️ تفاصيل المنتج\n"
-            f"━━━━━━━━━━━━━━━\n"
-            f"📦 الاسم: {product[1]}\n"
-            f"💰 السعر: {product[2]} نقطة\n"
-            f"💳 رصيدك: {user[2]} نقطة\n"
-            f"━━━━━━━━━━━━━━━\n\n"
-            f"{status}",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-    
-    elif query.data.startswith('confirm_buy_'):
-        product_id = int(query.data.split('_')[2])
-        conn = sqlite3.connect('points_bot.db')
-        c = conn.cursor()
-        c.execute('SELECT * FROM products WHERE id = ?', (product_id,))
-        product = c.fetchone()
-        conn.close()
-        
-        if not product:
-            await query.answer("❌ المنتج غير موجود!", show_alert=True)
-            return
-        
-        user = get_user(user_id)
-        if user[2] < product[2]:
-            await query.answer(f"❌ رصيدك غير كافي! تحتاج {product[2]} نقطة", show_alert=True)
-            return
-        
-        update_points(user_id, -product[2])
-        add_transaction(user_id, 'purchase', -product[2], f'شراء {product[1]}')
-        
-        try:
-            if product[3] == 'text':
-                await context.bot.send_message(user_id, f"✅ تم الشراء بنجاح!\n\n📝 المحتوى:\n{product[4]}")
-            elif product[3] == 'photo':
-                await context.bot.send_photo(user_id, product[4], caption="✅ تم الشراء بنجاح!")
-            elif product[3] == 'file':
-                await context.bot.send_document(user_id, product[4], caption="✅ تم الشراء بنجاح!")
-        except Exception as e:
-            update_points(user_id, product[2])
-            await query.answer(f"❌ فشل إرسال المنتج: {str(e)}", show_alert=True)
-            return
-        
-        try:
-            buyer = query.from_user
-            buyer_username = f"@{buyer.username}" if buyer.username else "لا يوجد"
-            buyer_name = buyer.first_name + (" " + buyer.last_name if buyer.last_name else "")
-            buyer_link = f"tg://user?id={user_id}"
-            
-            admin_notification = (
-                f"🔔 عملية شراء جديدة!\n\n"
-                f"👤 المشتري: {buyer_name}\n"
-                f"🆔 ID: `{user_id}`\n"
-                f"👁️ الرابط: [فتح الملف الشخصي]({buyer_link})\n"
-                f"📱 المعرف: {buyer_username}\n\n"
-                f"📦 المنتج: {product[1]}\n"
-                f"💰 السعر: {product[2]} نقطة\n\n"
-                f"🕐 الوقت: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-            )
-            
+            await query.answer()
             await context.bot.send_message(
-                ADMIN_ID,
-                admin_notification,
-                parse_mode='Markdown'
+                chat_id=user_id,
+                text="⚠️ *يجب الاشتراك في القنوات التالية للتصويت:*\n\n"
+                     "اضغط على الأزرار أدناه للاشتراك، ثم اضغط 'تحقق من الاشتراك'",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode=ParseMode.MARKDOWN
             )
-        except Exception as e:
-            logger.error(f"فشل إرسال إشعار للمشرف: {e}")
+            return
         
-        await query.edit_message_text(
-            f"✅ تم الشراء بنجاح!\n\n"
-            f"📦 المنتج: {product[1]}\n"
-            f"💰 تم خصم: {product[2]} نقطة\n"
-            f"💳 رصيدك الجديد: {user[2] - product[2]} نقطة",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data='back_to_main')]])
-        )
-        await query.answer("✅ تم الشراء بنجاح!", show_alert=True)
-    
-    elif query.data == 'transfer':
-        context.user_data['state'] = 'transfer_amount'
-        await query.edit_message_text(
-            "💸 أرسل عدد النقاط التي تريد تحويلها:",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ إلغاء", callback_data='cancel')]])
-        )
-        return WAITING_TRANSFER_AMOUNT
-    
-    elif query.data == 'buy_stars':
-        user = get_user(user_id)
-        user_points = user[2] if user else 0
-        stars_ratio = int(get_setting('stars_ratio'))
+        # التحقق من عدم التصويت سابقاً
+        async with aiosqlite.connect(self.db.db_name) as db:
+            async with db.execute('''
+                SELECT id FROM votes 
+                WHERE participant_id = ? AND user_id = ?
+            ''', (participant_id, user_id)) as cursor:
+                existing_vote = await cursor.fetchone()
         
-        packages = [
-            (1, 1 * stars_ratio, "⭐"),
-            (5, 5 * stars_ratio, "⭐⭐"),
-            (10, 10 * stars_ratio, "⭐⭐⭐"),
-            (20, 20 * stars_ratio, "💫"),
-            (50, 50 * stars_ratio, "🌟"),
-            (100, 100 * stars_ratio, "✨")
-        ]
+        if existing_vote:
+            await query.answer("✅ لقد صوّت بالفعل!", show_alert=True)
+            return
         
-        keyboard = []
-        for stars, points, emoji in packages:
-            keyboard.append([InlineKeyboardButton(
-                f"{emoji} {stars} نجمة = {points} نقطة",
-                callback_data=f'buystar_{stars}'
-            )])
-        
-        keyboard.append([InlineKeyboardButton("💳 مبلغ مخصص", callback_data='buy_stars_custom')])
-        keyboard.append([InlineKeyboardButton("🔙 رجوع", callback_data='back_to_main')])
-        
-        await query.edit_message_text(
-            f"⭐ شراء نقاط بالنجوم\n\n"
-            f"💰 رصيدك الحالي: {user_points} نقطة\n"
-            f"📊 النسبة: كل نجمة = {stars_ratio} نقطة\n\n"
-            f"اختر الباقة:",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-    
-    elif query.data.startswith('buystar_'):
-        stars = int(query.data.split('_')[1])
-        stars_ratio = int(get_setting('stars_ratio'))
-        points = stars * stars_ratio
-        
-        try:
-            invoice_link = await context.bot.create_invoice_link(
-                title=f"شراء {points} نقطة",
-                description=f"احصل على {points} نقطة مقابل {stars} نجمة",
-                payload=f"stars_{user_id}_{points}",
-                provider_token="",
-                currency="XTR",
-                prices=[LabeledPrice("نقاط", stars)]
-            )
+        # إضافة الصوت
+        async with aiosqlite.connect(self.db.db_name) as db:
+            await db.execute('''
+                INSERT INTO votes (participant_id, user_id)
+                VALUES (?, ?)
+            ''', (participant_id, user_id))
             
-            await query.edit_message_text(
-                f"⭐ رابط الدفع جاهز!\n\n"
-                f"💫 النجوم: {stars}\n"
-                f"💎 النقاط: {points}\n\n"
-                f"🔗 اضغط على الرابط:\n{invoice_link}",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🔙 رجوع للباقات", callback_data='buy_stars')],
-                    [InlineKeyboardButton("🏠 القائمة الرئيسية", callback_data='back_to_main')]
-                ])
-            )
-        except Exception as e:
-            await query.answer(f"❌ خطأ: {str(e)}", show_alert=True)
-    
-    elif query.data == 'referral':
-        bot_username = (await context.bot.get_me()).username
-        ref_link = f"https://t.me/{bot_username}?start=ref{user_id}"
-        referral_points = get_setting('referral_points')
-        
-        await query.edit_message_text(
-            f"👥 رابط الدعوة الخاص بك:\n\n"
-            f"`{ref_link}`\n\n"
-            f"🎁 احصل على {referral_points} نقطة عن كل صديق يشترك!",
-            parse_mode='Markdown',
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data='back_to_main')]])
-        )
-    
-    elif query.data == 'admin_panel':
-        if user_id != ADMIN_ID:
-            await query.answer("❌ غير مصرح لك!", show_alert=True)
-            return
-        
-        await query.edit_message_text(
-            "🎛️ لوحة التحكم",
-            reply_markup=admin_keyboard()
-        )
-    
-    elif query.data == 'admin_stats':
-        if user_id != ADMIN_ID:
-            await query.answer("❌ غير مصرح لك!", show_alert=True)
-            return
-        
-        conn = sqlite3.connect('points_bot.db')
-        c = conn.cursor()
-        c.execute('SELECT COUNT(*) FROM users')
-        total_users = c.fetchone()[0]
-        c.execute('SELECT SUM(points) FROM users')
-        total_points = c.fetchone()[0] or 0
-        c.execute('SELECT COUNT(*) FROM products')
-        total_products = c.fetchone()[0]
-        c.execute('SELECT COUNT(*) FROM channels')
-        total_channels = c.fetchone()[0]
-        c.execute('SELECT COUNT(*) FROM gift_codes')
-        total_codes = c.fetchone()[0]
-        conn.close()
-        
-        bot_status = get_setting('bot_status')
-        status_emoji = "✅" if bot_status == 'active' else "🔧"
-        
-        await query.edit_message_text(
-            f"📊 إحصائيات البوت:\n\n"
-            f"{status_emoji} الحالة: {'نشط' if bot_status == 'active' else 'صيانة'}\n"
-            f"👥 عدد المستخدمين: {total_users}\n"
-            f"💎 إجمالي النقاط: {total_points}\n"
-            f"🛒 عدد المنتجات: {total_products}\n"
-            f"📺 عدد القنوات: {total_channels}\n"
-            f"🎫 أكواد الهدايا: {total_codes}",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data='admin_panel')]])
-        )
-    
-    elif query.data == 'admin_settings':
-        if user_id != ADMIN_ID:
-            await query.answer("❌ غير مصرح لك!", show_alert=True)
-            return
-        
-        keyboard = [
-            [InlineKeyboardButton("📝 تعديل رسالة الترحيب", callback_data='edit_welcome')],
-            [InlineKeyboardButton("🎁 نقاط الإحالة", callback_data='edit_referral_points')],
-            [InlineKeyboardButton("💵 رسوم التحويل", callback_data='edit_transfer_fee')],
-            [InlineKeyboardButton("🎁 الهدية اليومية", callback_data='edit_daily_gift')],
-            [InlineKeyboardButton("⭐ نسبة النجوم", callback_data='edit_stars_ratio')],
-            [InlineKeyboardButton("🔙 رجوع", callback_data='admin_panel')]
-        ]
-        await query.edit_message_text(
-            "⚙️ الإعدادات",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-    
-    elif query.data == 'edit_daily_gift':
-        if user_id != ADMIN_ID:
-            await query.answer("❌ غير مصرح لك!", show_alert=True)
-            return
-        
-        mode = get_setting('daily_gift_mode')
-        keyboard = [
-            [InlineKeyboardButton(f"{'✅' if mode == 'fixed' else '⬜'} ثابتة", callback_data='gift_mode_fixed')],
-            [InlineKeyboardButton(f"{'✅' if mode == 'random' else '⬜'} عشوائية", callback_data='gift_mode_random')],
-            [InlineKeyboardButton("🔙 رجوع", callback_data='admin_settings')]
-        ]
-        
-        if mode == 'fixed':
-            points = get_setting('daily_gift_points')
-            text = f"🎁 الهدية اليومية: {points} نقطة (ثابتة)"
-        else:
-            min_p = get_setting('daily_gift_min')
-            max_p = get_setting('daily_gift_max')
-            text = f"🎁 الهدية اليومية: من {min_p} إلى {max_p} نقطة (عشوائية)"
-        
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
-    
-    elif query.data == 'gift_mode_fixed':
-        if user_id != ADMIN_ID:
-            return
-        set_setting('daily_gift_mode', 'fixed')
-        context.user_data['state'] = 'edit_fixed_gift'
-        await query.edit_message_text(
-            "أرسل عدد النقاط للهدية اليومية:",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ إلغاء", callback_data='admin_settings')]])
-        )
-    
-    elif query.data == 'gift_mode_random':
-        if user_id != ADMIN_ID:
-            return
-        set_setting('daily_gift_mode', 'random')
-        context.user_data['state'] = 'edit_random_gift_min'
-        await query.edit_message_text(
-            "أرسل الحد الأدنى للنقاط:",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ إلغاء", callback_data='admin_settings')]])
-        )
-    
-    elif query.data == 'toggle_bot_status':
-        if user_id != ADMIN_ID:
-            await query.answer("❌ غير مصرح لك!", show_alert=True)
-            return
-        
-        current_status = get_setting('bot_status')
-        new_status = 'maintenance' if current_status == 'active' else 'active'
-        set_setting('bot_status', new_status)
-        
-        status_text = "🔧 وضع الصيانة" if new_status == 'maintenance' else "✅ البوت نشط"
-        status_emoji = "🔧" if new_status == 'maintenance' else "✅"
-        
-        await query.answer(f"تم التغيير إلى: {status_text}", show_alert=True)
-        await query.edit_message_text(
-            f"🎛️ لوحة التحكم\n\n{status_emoji} حالة البوت: {status_text}",
-            reply_markup=admin_keyboard()
-        )
-    
-    elif query.data == 'add_product':
-        if user_id != ADMIN_ID:
-            await query.answer("❌ غير مصرح لك!", show_alert=True)
-            return
-        
-        context.user_data['state'] = 'add_product_name'
-        await query.edit_message_text(
-            "أرسل اسم المنتج:",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ إلغاء", callback_data='admin_panel')]])
-        )
-    
-    elif query.data == 'delete_product':
-        if user_id != ADMIN_ID:
-            await query.answer("❌ غير مصرح لك!", show_alert=True)
-            return
-        
-        products = get_products()
-        if not products:
-            await query.answer("لا توجد منتجات!", show_alert=True)
-            return
-        
-        keyboard = []
-        for product in products:
-            keyboard.append([InlineKeyboardButton(
-                f"🗑️ {product[1]} - {product[2]} نقطة",
-                callback_data=f'delp_{product[0]}'
-            )])
-        keyboard.append([InlineKeyboardButton("🔙 رجوع", callback_data='admin_panel')])
-        
-        await query.edit_message_text(
-            "اختر المنتج للحذف:",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-    
-    elif query.data.startswith('delp_'):
-        if user_id != ADMIN_ID:
-            return
-        
-        product_id = int(query.data.split('_')[1])
-        delete_product(product_id)
-        await query.answer("✅ تم حذف المنتج!", show_alert=True)
-        await query.edit_message_text("🎛️ لوحة التحكم", reply_markup=admin_keyboard())
-    
-    elif query.data == 'broadcast':
-        if user_id != ADMIN_ID:
-            await query.answer("❌ غير مصرح لك!", show_alert=True)
-            return
-        
-        context.user_data['state'] = 'broadcast'
-        await query.edit_message_text(
-            "📢 أرسل الرسالة للإذاعة:",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ إلغاء", callback_data='admin_panel')]])
-        )
-    
-    elif query.data == 'manage_channels':
-        if user_id != ADMIN_ID:
-            await query.answer("❌ غير مصرح لك!", show_alert=True)
-            return
-        
-        keyboard = [
-            [InlineKeyboardButton("➕ إضافة قناة", callback_data='add_channel')],
-            [InlineKeyboardButton("➖ حذف قناة", callback_data='remove_channel')],
-            [InlineKeyboardButton("📋 عرض القنوات", callback_data='list_channels')],
-            [InlineKeyboardButton("🔙 رجوع", callback_data='admin_panel')]
-        ]
-        await query.edit_message_text(
-            "📺 إدارة القنوات",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-    
-    elif query.data == 'add_channel':
-        if user_id != ADMIN_ID:
-            return
-        
-        context.user_data['state'] = 'add_channel'
-        await query.edit_message_text(
-            "أرسل معرف القناة (مثال: @channel_name):",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ إلغاء", callback_data='manage_channels')]])
-        )
-    
-    elif query.data == 'list_channels':
-        if user_id != ADMIN_ID:
-            return
-        
-        channels = get_channels()
-        if not channels:
-            await query.answer("لا توجد قنوات!", show_alert=True)
-            return
-        
-        text = "📋 القنوات المسجلة:\n\n"
-        for channel in channels:
-            text += f"• @{channel[1]}\n"
-        
-        await query.edit_message_text(
-            text,
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data='manage_channels')]])
-        )
-    
-    elif query.data == 'remove_channel':
-        if user_id != ADMIN_ID:
-            return
-        
-        channels = get_channels()
-        if not channels:
-            await query.answer("لا توجد قنوات!", show_alert=True)
-            return
-        
-        keyboard = []
-        for channel in channels:
-            keyboard.append([InlineKeyboardButton(
-                f"🗑️ @{channel[1]}",
-                callback_data=f'delch_{channel[0]}'
-            )])
-        keyboard.append([InlineKeyboardButton("🔙 رجوع", callback_data='manage_channels')])
-        
-        await query.edit_message_text(
-            "اختر القناة للحذف:",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-    
-    elif query.data.startswith('delch_'):
-        if user_id != ADMIN_ID:
-            return
-        
-        channel_id = query.data.split('_', 1)[1]
-        remove_channel(channel_id)
-        await query.answer("✅ تم حذف القناة!", show_alert=True)
-        
-        keyboard = [
-            [InlineKeyboardButton("➕ إضافة قناة", callback_data='add_channel')],
-            [InlineKeyboardButton("➖ حذف قناة", callback_data='remove_channel')],
-            [InlineKeyboardButton("📋 عرض القنوات", callback_data='list_channels')],
-            [InlineKeyboardButton("🔙 رجوع", callback_data='admin_panel')]
-        ]
-        await query.edit_message_text(
-            "📺 إدارة القنوات",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-    
-    elif query.data == 'create_gift_code':
-        if user_id != ADMIN_ID:
-            await query.answer("❌ غير مصرح لك!", show_alert=True)
-            return
-        
-        context.user_data['state'] = 'gift_code_points'
-        await query.edit_message_text(
-            "أرسل عدد النقاط في الكود:",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ إلغاء", callback_data='admin_panel')]])
-        )
-    
-    elif query.data == 'edit_welcome':
-        if user_id != ADMIN_ID:
-            return
-        
-        context.user_data['state'] = 'edit_welcome'
-        await query.edit_message_text(
-            "أرسل رسالة الترحيب الجديدة:",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ إلغاء", callback_data='admin_settings')]])
-        )
-    
-    elif query.data == 'edit_referral_points':
-        if user_id != ADMIN_ID:
-            return
-        
-        context.user_data['state'] = 'edit_referral_points'
-        current = get_setting('referral_points')
-        await query.edit_message_text(
-            f"النقاط الحالية: {current}\n\nأرسل عدد النقاط الجديد:",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ إلغاء", callback_data='admin_settings')]])
-        )
-    
-    elif query.data == 'edit_transfer_fee':
-        if user_id != ADMIN_ID:
-            return
-        
-        context.user_data['state'] = 'edit_transfer_fee'
-        current = get_setting('transfer_fee')
-        await query.edit_message_text(
-            f"الرسوم الحالية: {current}\n\nأرسل رسوم التحويل الجديدة:",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ إلغاء", callback_data='admin_settings')]])
-        )
-    
-    elif query.data == 'edit_stars_ratio':
-        if user_id != ADMIN_ID:
-            return
-        
-        context.user_data['state'] = 'edit_stars_ratio'
-        current = get_setting('stars_ratio')
-        await query.edit_message_text(
-            f"النسبة الحالية: كل نجمة = {current} نقطة\n\nأرسل النسبة الجديدة:",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ إلغاء", callback_data='admin_settings')]])
-        )
-    
-    elif query.data == 'check_subscription':
-        if await check_subscription(user_id, context):
-            welcome_message = get_setting('welcome_message')
-            await query.edit_message_text(welcome_message, reply_markup=main_keyboard(user_id))
-        else:
-            await query.answer("⚠️ لم تشترك في جميع القنوات بعد!", show_alert=True)
-    
-    elif query.data == 'back_to_main':
-        context.user_data.clear()
-        welcome_message = get_setting('welcome_message')
-        await query.edit_message_text(welcome_message, reply_markup=main_keyboard(user_id))
-    
-    elif query.data == 'cancel':
-        context.user_data.clear()
-        await query.edit_message_text(
-            "❌ تم الإلغاء",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data='back_to_main')]])
-        )
-        return ConversationHandler.END
-    
-    elif query.data.startswith('refund_'):
-        if user_id != ADMIN_ID:
-            await query.answer("❌ غير مصرح لك!", show_alert=True)
-            return
-        
-        refund_id = int(query.data.split('_')[1])
-        
-        conn = sqlite3.connect('points_bot.db')
-        c = conn.cursor()
-        c.execute('SELECT user_id, charge_id FROM refund_requests WHERE id = ?', (refund_id,))
-        refund_data = c.fetchone()
-        conn.close()
-        
-        if not refund_data:
-            await query.answer("❌ طلب الاسترداد غير موجود!", show_alert=True)
-            return
-        
-        target_user_id = refund_data[0]
-        charge_id = refund_data[1]
-        
-        await query.answer("⏳ جاري استرداد النجوم...", show_alert=True)
-        
-        try:
-            await context.bot.refund_star_payment(
-                user_id=target_user_id,
-                telegram_payment_charge_id=charge_id
-            )
+            await db.execute('''
+                UPDATE voting_participants 
+                SET votes = votes + 1 
+                WHERE id = ?
+            ''', (participant_id,))
             
-            await query.edit_message_text(
-                f"{query.message.text}\n\n"
-                f"✅ تم استرداد النجوم بنجاح!\n"
-                f"⏰ الوقت: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-            )
+            await db.commit()
             
-            try:
-                await context.bot.send_message(
-                    target_user_id,
-                    f"💰 تم إرجاع النجوم إلى حسابك!\n\n"
-                    f"🆔 رقم المعاملة:\n`{charge_id}`\n\n"
-                    f"شكراً لتعاملك معنا! 💫",
-                    parse_mode='Markdown'
-                )
-            except:
-                pass
-                
-        except Exception as e:
-            error_msg = str(e)
-            if "CHARGE_ALREADY_REFUNDED" in error_msg:
-                await query.answer("⚠️ تم استرداد هذه المعاملة مسبقاً!", show_alert=True)
-            else:
-                await query.answer(f"❌ فشل الاسترداد: {error_msg}", show_alert=True)
-
-# معالجة الرسائل النصية
-async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text if update.message.text else None
-    user_id = update.effective_user.id
-    state = context.user_data.get('state')
-    
-    if state == 'transfer_amount':
-        if not text or not text.isdigit():
-            await update.message.reply_text("❌ أرسل رقماً صحيحاً!")
-            return WAITING_TRANSFER_AMOUNT
+            # الحصول على عدد الأصوات الجديد
+            async with db.execute('''
+                SELECT votes FROM voting_participants WHERE id = ?
+            ''', (participant_id,)) as cursor:
+                new_votes = (await cursor.fetchone())[0]
         
-        amount = int(text)
-        if amount < 1:
-            await update.message.reply_text("❌ أقل مبلغ للتحويل هو 1 نقطة!")
-            return WAITING_TRANSFER_AMOUNT
-        
-        user = get_user(user_id)
-        transfer_fee = int(get_setting('transfer_fee'))
-        total_needed = amount + transfer_fee
-        
-        if user[2] < total_needed:
-            max_transfer = max(0, user[2] - transfer_fee)
-            await update.message.reply_text(
-                f"❌ رصيدك غير كافي!\n\n"
-                f"💰 رصيدك: {user[2]} نقطة\n"
-                f"📤 المبلغ المطلوب: {amount} نقطة\n"
-                f"💵 العمولة: {transfer_fee} نقطة\n"
-                f"💳 الإجمالي: {total_needed} نقطة\n\n"
-                f"{'يمكنك تحويل ' + str(max_transfer) + ' نقطة كحد أقصى' if max_transfer > 0 else 'رصيدك غير كافي للتحويل'}",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data='back_to_main')]])
-            )
-            context.user_data.clear()
-            return ConversationHandler.END
-        
-        context.user_data['transfer_amount'] = amount
-        context.user_data['state'] = 'transfer_id'
-        await update.message.reply_text(
-            f"💸 سيتم تحويل {amount} نقطة\n"
-            f"💵 عمولة التحويل: {transfer_fee} نقطة\n"
-            f"💳 الإجمالي: {total_needed} نقطة\n\n"
-            "أرسل ID المستخدم المستلم:",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ إلغاء", callback_data='cancel')]])
-        )
-        return WAITING_TRANSFER_ID
-    
-    elif state == 'transfer_id':
-        if not text or not text.isdigit():
-            await update.message.reply_text("❌ أرسل ID صحيح!")
-            return WAITING_TRANSFER_ID
-        
-        receiver_id = int(text)
-        if receiver_id == user_id:
-            await update.message.reply_text("❌ لا يمكنك التحويل لنفسك!")
-            return WAITING_TRANSFER_ID
-        
-        receiver = get_user(receiver_id)
-        if not receiver:
-            await update.message.reply_text("❌ المستخدم غير موجود!")
-            return WAITING_TRANSFER_ID
-        
-        amount = context.user_data['transfer_amount']
-        transfer_fee = int(get_setting('transfer_fee'))
-        
-        update_points(user_id, -(amount + transfer_fee))
-        update_points(receiver_id, amount)
-        
-        add_transaction(user_id, 'transfer_out', -(amount + transfer_fee), f'تحويل إلى {receiver_id}')
-        add_transaction(receiver_id, 'transfer_in', amount, f'تحويل من {user_id}')
-        
-        await update.message.reply_text(
-            f"✅ تم التحويل بنجاح!\n\n"
-            f"📤 المبلغ المحول: {amount} نقطة\n"
-            f"💵 العمولة: {transfer_fee} نقطة",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data='back_to_main')]])
-        )
-        
+        # تحديث الرسالة
         try:
-            await context.bot.send_message(
-                receiver_id,
-                f"💰 استلمت {amount} نقطة من مستخدم {user_id}"
+            await context.bot.edit_message_text(
+                chat_id=channel_id,
+                message_id=participant['message_id'],
+                text=f"🎯 المتسابق: {participant['name']}\n\n"
+                     f"❤️ عدد الأصوات: {new_votes}",
+                reply_markup=query.message.reply_markup
             )
-        except:
+        except TelegramError:
             pass
         
-        context.user_data.clear()
-        return ConversationHandler.END
+        await query.answer("✅ تم التصويت بنجاح!", show_alert=True)
+        
+        # حفظ معلومات التحقق من الاشتراك
+        async with aiosqlite.connect(self.db.db_name) as db:
+            await db.execute('''
+                INSERT OR REPLACE INTO subscription_checks 
+                (user_id, channel_id, is_subscribed)
+                VALUES (?, ?, 1)
+            ''', (user_id, channel_id))
+            await db.commit()
     
-    elif state == 'buy_stars':
-        if not text or not text.isdigit():
-            await update.message.reply_text("❌ أرسل رقماً صحيحاً!")
-            return WAITING_STARS_AMOUNT
+    async def check_subscriptions_task(
+        self,
+        context: ContextTypes.DEFAULT_TYPE
+    ):
+        """مهمة دورية للتحقق من الاشتراكات"""
+        async with aiosqlite.connect(self.db.db_name) as db:
+            db.row_factory = aiosqlite.Row
+            
+            # الحصول على جميع الأصوات النشطة
+            async with db.execute('''
+                SELECT v.*, vp.contest_id, c.channel_id
+                FROM votes v
+                JOIN voting_participants vp ON v.participant_id = vp.id
+                JOIN contests c ON vp.contest_id = c.id
+                WHERE c.status = 'active'
+            ''') as cursor:
+                votes = await cursor.fetchall()
         
-        stars = int(text)
-        if stars < 1:
-            await update.message.reply_text("❌ أقل عدد نجوم هو 1!")
-            return WAITING_STARS_AMOUNT
-        
-        stars_ratio = int(get_setting('stars_ratio'))
-        points = stars * stars_ratio
-        
-        try:
-            invoice_link = await context.bot.create_invoice_link(
-                title=f"شراء {points} نقطة",
-                description=f"احصل على {points} نقطة مقابل {stars} نجمة",
-                payload=f"stars_{user_id}_{points}",
-                provider_token="",
-                currency="XTR",
-                prices=[LabeledPrice("نقاط", stars)]
+        for vote in votes:
+            user_id = vote['user_id']
+            channel_id = vote['channel_id']
+            
+            # التحقق من الاشتراك
+            is_subscribed = await check_user_subscription(
+                context, user_id, channel_id
             )
             
-            await update.message.reply_text(
-                f"⭐ اضغط على الرابط للدفع:\n\n"
-                f"{invoice_link}\n\n"
-                f"💎 ستحصل على {points} نقطة",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data='back_to_main')]])
-            )
-        except Exception as e:
-            await update.message.reply_text(f"❌ حدث خطأ: {str(e)}")
-        
-        context.user_data.clear()
-        return ConversationHandler.END
+            if not is_subscribed:
+                # حذف الصوت
+                async with aiosqlite.connect(self.db.db_name) as db:
+                    await db.execute(
+                        'DELETE FROM votes WHERE id = ?',
+                        (vote['id'],)
+                    )
+                    await db.execute('''
+                        UPDATE voting_participants 
+                        SET votes = votes - 1 
+                        WHERE id = ?
+                    ''', (vote['participant_id'],))
+                    await db.commit()
+                
+                logger.info(
+                    f"Removed vote from user {user_id} "
+                    f"for leaving channel {channel_id}"
+                )
     
-    elif state == 'add_product_name':
-        if user_id != ADMIN_ID or not text:
+    async def end_contest(
+        self,
+        context: ContextTypes.DEFAULT_TYPE,
+        contest_id: int
+    ):
+        """إنهاء المسابقة ونشر النتائج"""
+        contest = await self.db.get_contest(contest_id)
+        if not contest:
             return
         
-        context.user_data['product_name'] = text
-        context.user_data['state'] = 'add_product_price'
-        await update.message.reply_text(
-            "أرسل سعر المنتج (بالنقاط):",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ إلغاء", callback_data='admin_panel')]])
+        channel_id = contest['channel_id']
+        
+        logger.info(f"Starting final subscription check for voting contest {contest_id}")
+        
+        # الفحص النهائي: حذف جميع الأصوات من المستخدمين غير المشتركين
+        async with aiosqlite.connect(self.db.db_name) as db:
+            db.row_factory = aiosqlite.Row
+            
+            # الحصول على جميع الأصوات
+            async with db.execute('''
+                SELECT DISTINCT v.user_id, v.participant_id
+                FROM votes v
+                JOIN voting_participants vp ON v.participant_id = vp.id
+                WHERE vp.contest_id = ?
+            ''', (contest_id,)) as cursor:
+                all_votes = await cursor.fetchall()
+        
+        # التحقق من اشتراك كل مصوت
+        removed_votes_count = 0
+        for vote in all_votes:
+            user_id = vote['user_id']
+            
+            # التحقق من الاشتراك في القناتين
+            channels = [OFFICIAL_CHANNEL, channel_id]
+            is_subscribed, _ = await check_multiple_subscriptions(
+                context, user_id, channels
+            )
+            
+            if not is_subscribed:
+                # حذف الصوت
+                async with aiosqlite.connect(self.db.db_name) as db:
+                    await db.execute('''
+                        DELETE FROM votes 
+                        WHERE user_id = ? AND participant_id = ?
+                    ''', (user_id, vote['participant_id']))
+                    
+                    await db.execute('''
+                        UPDATE voting_participants 
+                        SET votes = votes - 1 
+                        WHERE id = ?
+                    ''', (vote['participant_id'],))
+                    
+                    await db.commit()
+                
+                removed_votes_count += 1
+                logger.info(f"Removed vote from user {user_id} (not subscribed)")
+        
+        if removed_votes_count > 0:
+            logger.info(f"Removed {removed_votes_count} votes from unsubscribed users")
+        
+        # الحصول على جميع المتسابقين مع message_id والأصوات النهائية
+        async with aiosqlite.connect(self.db.db_name) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute('''
+                SELECT name, votes, message_id
+                FROM voting_participants 
+                WHERE contest_id = ?
+                ORDER BY votes DESC
+            ''', (contest_id,)) as cursor:
+                results = await cursor.fetchall()
+        
+        # حذف أزرار التصويت من جميع المنشورات
+        for result in results:
+            if result['message_id']:
+                try:
+                    await context.bot.edit_message_text(
+                        chat_id=channel_id,
+                        message_id=result['message_id'],
+                        text=f"🎯 المتسابق: {result['name']}\n\n"
+                             f"❤️ عدد الأصوات النهائي: {result['votes']}"
+                    )
+                except TelegramError:
+                    pass
+        
+        # تنسيق النتائج
+        results_text = "🏆 *انتهت المسابقة!*\n\n"
+        results_text += "📊 *النتائج النهائية:*\n\n"
+        
+        for i, result in enumerate(results, 1):
+            medal = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else "▫️"
+            results_text += (
+                f"{medal} {result['name']}: "
+                f"{result['votes']} صوت\n"
+            )
+        
+        # نشر النتائج
+        await context.bot.send_message(
+            chat_id=channel_id,
+            text=results_text,
+            parse_mode=ParseMode.MARKDOWN
         )
+        
+        # إنهاء المسابقة في قاعدة البيانات
+        await self.db.end_contest(contest_id)
+        
+        logger.info(f"Voting contest {contest_id} ended successfully")
+
+# ═══════════════════════════════════════════════════════════════
+# 🎰 عجلة الحظ (Lucky Wheel)
+# ═══════════════════════════════════════════════════════════════
+
+class LuckyWheelContest:
+    """إدارة مسابقة عجلة الحظ"""
     
-    elif state == 'add_product_price':
-        if user_id != ADMIN_ID:
-            return
+    def __init__(self, db: Database):
+        self.db = db
+    
+    async def create(
+        self,
+        owner_id: int,
+        channel_id: str,
+        max_participants: int,
+        winners_count: int,
+        custom_message: str = None
+    ) -> int:
+        """إنشاء مسابقة عجلة حظ"""
+        settings = {
+            'max_participants': max_participants,
+            'winners_count': winners_count,
+            'custom_message': custom_message or ""
+        }
         
-        if not text or not text.isdigit():
-            await update.message.reply_text("❌ أرسل رقماً صحيحاً!")
-            return
-        
-        context.user_data['product_price'] = int(text)
-        context.user_data['state'] = 'add_product_content'
-        await update.message.reply_text(
-            "أرسل محتوى المنتج (نص، صورة، أو ملف):",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ إلغاء", callback_data='admin_panel')]])
+        contest_id = await self.db.create_contest(
+            owner_id, channel_id, 'lucky_wheel', settings
         )
+        
+        return contest_id
     
-    elif state == 'add_product_content':
-        if user_id != ADMIN_ID:
+    async def publish_contest(
+        self,
+        context: ContextTypes.DEFAULT_TYPE,
+        contest_id: int,
+        channel_id: str,
+        max_participants: int,
+        custom_message: str = None
+    ) -> int:
+        """نشر مسابقة عجلة الحظ"""
+        keyboard = [[
+            InlineKeyboardButton(
+                "🎫 الانضمام للمسابقة",
+                callback_data=f"lucky_join_{contest_id}"
+            )
+        ]]
+        
+        # النص الأساسي
+        base_text = f"🎰 *مسابقة عجلة الحظ!*\n\n"
+        
+        # إضافة النص المخصص إذا وجد
+        if custom_message:
+            base_text += f"{custom_message}\n\n"
+        
+        base_text += f"👥 المشتركون: 0/{max_participants}\n\n"
+        base_text += "اضغط للانضمام والحصول على فرصتك!"
+        
+        message = await context.bot.send_message(
+            chat_id=channel_id,
+            text=base_text,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode=ParseMode.MARKDOWN
+        )
+        
+        # حفظ معرف الرسالة
+        async with aiosqlite.connect(self.db.db_name) as db:
+            await db.execute('''
+                UPDATE contests 
+                SET settings = json_set(settings, '$.message_id', ?)
+                WHERE id = ?
+            ''', (message.message_id, contest_id))
+            await db.commit()
+        
+        return message.message_id
+    
+    async def handle_join(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE
+    ):
+        """معالجة الانضمام للمسابقة"""
+        query = update.callback_query
+        
+        contest_id = int(query.data.split('_')[2])
+        user_id = query.from_user.id
+        username = query.from_user.username or f"user_{user_id}"
+        
+        # الحصول على معلومات المسابقة
+        contest = await self.db.get_contest(contest_id)
+        if not contest or contest['status'] != 'active':
+            await query.answer("❌ المسابقة منتهية!", show_alert=True)
             return
         
-        name = context.user_data.get('product_name')
-        price = context.user_data.get('product_price')
+        channel_id = contest['channel_id']
+        settings = json.loads(contest['settings'])
+        max_participants = settings['max_participants']
         
-        if not name or not price:
-            await update.message.reply_text("❌ حدث خطأ! ابدأ من جديد.")
-            context.user_data.clear()
+        # التحقق من الاشتراك في قناة المسابقة فقط (بدون القناة الرسمية)
+        is_subscribed = await check_user_subscription(context, user_id, channel_id)
+        
+        if not is_subscribed:
+            await query.answer(
+                f"⚠️ يجب الاشتراك في القناة {channel_id} للانضمام!",
+                show_alert=True
+            )
             return
         
-        if update.message.text:
-            add_product(name, price, 'text', text)
-            await update.message.reply_text(
-                "✅ تم إضافة المنتج بنجاح!",
-                reply_markup=admin_keyboard()
+        # التحقق من عدم الانضمام سابقاً
+        async with aiosqlite.connect(self.db.db_name) as db:
+            async with db.execute('''
+                SELECT id FROM lucky_participants 
+                WHERE contest_id = ? AND user_id = ?
+            ''', (contest_id, user_id)) as cursor:
+                existing = await cursor.fetchone()
+        
+        if existing:
+            await query.answer("✅ أنت مشترك بالفعل في المسابقة!", show_alert=True)
+            return
+        
+        # الحصول على عدد المشتركين الحالي
+        async with aiosqlite.connect(self.db.db_name) as db:
+            async with db.execute('''
+                SELECT COUNT(*) FROM lucky_participants 
+                WHERE contest_id = ?
+            ''', (contest_id,)) as cursor:
+                current_count = (await cursor.fetchone())[0]
+        
+        if current_count >= max_participants:
+            await query.answer(
+                "❌ المسابقة مكتملة! العدد الأقصى تم الوصول إليه",
+                show_alert=True
             )
-        elif update.message.photo:
-            file_id = update.message.photo[-1].file_id
-            add_product(name, price, 'photo', file_id)
-            await update.message.reply_text(
-                "✅ تم إضافة المنتج (صورة) بنجاح!",
-                reply_markup=admin_keyboard()
+            return
+        
+        # إضافة المشترك
+        async with aiosqlite.connect(self.db.db_name) as db:
+            await db.execute('''
+                INSERT INTO lucky_participants (contest_id, user_id, username)
+                VALUES (?, ?, ?)
+            ''', (contest_id, user_id, username))
+            await db.commit()
+        
+        new_count = current_count + 1
+        
+        # تحديث الرسالة
+        try:
+            message_id = settings.get('message_id')
+            custom_message = settings.get('custom_message', '')
+            
+            if message_id:
+                # النص الأساسي
+                base_text = f"🎰 *مسابقة عجلة الحظ!*\n\n"
+                
+                # إضافة النص المخصص إذا وجد
+                if custom_message:
+                    base_text += f"{custom_message}\n\n"
+                
+                base_text += f"👥 المشتركون: {new_count}/{max_participants}\n\n"
+                base_text += "اضغط للانضمام والحصول على فرصتك!"
+                
+                await context.bot.edit_message_text(
+                    chat_id=channel_id,
+                    message_id=message_id,
+                    text=base_text,
+                    reply_markup=query.message.reply_markup,
+                    parse_mode=ParseMode.MARKDOWN
+                )
+        except TelegramError:
+            pass
+        
+        await query.answer("✅ تم الانضمام بنجاح! حظاً موفقاً 🍀", show_alert=True)
+        
+        # إذا اكتمل العدد، إجراء السحب تلقائياً
+        if new_count >= max_participants:
+            await self.draw_winners(context, contest_id)
+    
+    async def draw_winners(
+        self,
+        context: ContextTypes.DEFAULT_TYPE,
+        contest_id: int
+    ):
+        """إجراء السحب واختيار الفائزين"""
+        contest = await self.db.get_contest(contest_id)
+        if not contest:
+            return
+        
+        settings = json.loads(contest['settings'])
+        winners_count = settings['winners_count']
+        channel_id = contest['channel_id']
+        
+        logger.info(f"Starting final subscription check for lucky wheel contest {contest_id}")
+        
+        # الفحص النهائي: حذف المشتركين غير المشتركين في القناة
+        async with aiosqlite.connect(self.db.db_name) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute('''
+                SELECT user_id, username 
+                FROM lucky_participants 
+                WHERE contest_id = ?
+            ''', (contest_id,)) as cursor:
+                all_participants = await cursor.fetchall()
+        
+        # التحقق من اشتراك كل مشارك
+        removed_count = 0
+        valid_participants = []
+        
+        for participant in all_participants:
+            user_id = participant['user_id']
+            
+            # التحقق من الاشتراك في القناتين
+            channels = [OFFICIAL_CHANNEL, channel_id]
+            is_subscribed, _ = await check_multiple_subscriptions(
+                context, user_id, channels
             )
-        elif update.message.document:
-            file_id = update.message.document.file_id
-            add_product(name, price, 'file', file_id)
-            await update.message.reply_text(
-                "✅ تم إضافة المنتج (ملف) بنجاح!",
-                reply_markup=admin_keyboard()
+            
+            if is_subscribed:
+                valid_participants.append(participant)
+            else:
+                # حذف المشترك
+                async with aiosqlite.connect(self.db.db_name) as db:
+                    await db.execute('''
+                        DELETE FROM lucky_participants 
+                        WHERE contest_id = ? AND user_id = ?
+                    ''', (contest_id, user_id))
+                    await db.commit()
+                
+                removed_count += 1
+                logger.info(f"Removed participant {user_id} (not subscribed)")
+        
+        if removed_count > 0:
+            logger.info(f"Removed {removed_count} participants from unsubscribed users")
+        
+        # اختيار الفائزين من المشتركين الصالحين فقط
+        if not valid_participants:
+            await context.bot.send_message(
+                chat_id=channel_id,
+                text="❌ لا يوجد مشتركون صالحون للسحب!",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            await self.db.end_contest(contest_id)
+            return
+        
+        winners = random.sample(
+            valid_participants,
+            min(winners_count, len(valid_participants))
+        )
+        
+        # تنسيق النتائج
+        results_text = "🎊 *نتائج السحب!*\n\n"
+        results_text += "🏆 *الفائزون:*\n\n"
+        
+        for i, winner in enumerate(winners, 1):
+            username = winner['username']
+            user_id = winner['user_id']
+            
+            if username.startswith('user_'):
+                results_text += f"{i}. ID: `{user_id}`\n"
+            else:
+                results_text += f"{i}. @{username} (ID: `{user_id}`)\n"
+        
+        results_text += "\n🎉 مبروك للفائزين!"
+        
+        # نشر النتائج
+        try:
+            message_id = settings.get('message_id')
+            if message_id:
+                await context.bot.edit_message_text(
+                    chat_id=channel_id,
+                    message_id=message_id,
+                    text=results_text,
+                    parse_mode=ParseMode.MARKDOWN
+                )
+        except TelegramError:
+            await context.bot.send_message(
+                chat_id=channel_id,
+                text=results_text,
+                parse_mode=ParseMode.MARKDOWN
+            )
+        
+        # إنهاء المسابقة
+        await self.db.end_contest(contest_id)
+        
+        # إرسال إشعارات للفائزين
+        for winner in winners:
+            try:
+                await context.bot.send_message(
+                    chat_id=winner['user_id'],
+                    text="🎉 مبروك! لقد فزت في المسابقة!"
+                )
+            except TelegramError:
+                pass
+        
+        logger.info(f"Lucky wheel contest {contest_id} ended successfully")
+
+# ═══════════════════════════════════════════════════════════════
+# 🔗 مسابقة الإحالات (Referral Contest)
+# ═══════════════════════════════════════════════════════════════
+
+class ReferralContest:
+    """إدارة مسابقة الإحالات"""
+    
+    def __init__(self, db: Database):
+        self.db = db
+    
+    async def create(
+        self,
+        owner_id: int,
+        channel_id: str,
+        message_text: str
+    ) -> int:
+        """إنشاء مسابقة إحالات"""
+        settings = {
+            'message_text': message_text
+        }
+        
+        contest_id = await self.db.create_contest(
+            owner_id, channel_id, 'referral', settings
+        )
+        
+        return contest_id
+    
+    async def publish_contest(
+        self,
+        context: ContextTypes.DEFAULT_TYPE,
+        contest_id: int,
+        channel_id: str,
+        message_text: str
+    ) -> int:
+        """نشر مسابقة الإحالات"""
+        keyboard = [[
+            InlineKeyboardButton(
+                "🚀 الانضمام للمسابقة",
+                url=f"https://t.me/{context.bot.username}?start=ref_{contest_id}"
+            )
+        ]]
+        
+        message = await context.bot.send_message(
+            chat_id=channel_id,
+            text=f"{message_text}\n\n"
+                 f"👇 اضغط للانضمام والحصول على رابط الإحالة الخاص بك!",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode=ParseMode.MARKDOWN
+        )
+        
+        # حفظ رابط المنشور في إعدادات المسابقة
+        async with aiosqlite.connect(self.db.db_name) as db:
+            # الحصول على الإعدادات الحالية
+            async with db.execute(
+                'SELECT settings FROM contests WHERE id = ?', (contest_id,)
+            ) as cursor:
+                result = await cursor.fetchone()
+                if result:
+                    settings = json.loads(result[0])
+                else:
+                    settings = {}
+            
+            # إضافة معرف الرسالة ورابط المنشور
+            settings['contest_message_id'] = message.message_id
+            
+            # تكوين رابط المنشور
+            clean_channel = channel_id.replace('@', '')
+            contest_post_link = f"https://t.me/{clean_channel}/{message.message_id}"
+            settings['contest_post_link'] = contest_post_link
+            
+            await db.execute('''
+                UPDATE contests 
+                SET settings = ?
+                WHERE id = ?
+            ''', (json.dumps(settings), contest_id))
+            await db.commit()
+        
+        return message.message_id
+    
+    async def handle_referral_join(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+        contest_id: int,
+        referrer_id: Optional[int] = None
+    ):
+        """معالجة الانضمام عبر رابط الإحالة"""
+        user_id = update.effective_user.id
+        username = update.effective_user.username or f"user_{user_id}"
+        
+        # تحديد ما إذا كان callback أم message
+        is_callback = update.callback_query is not None
+        
+        # الحصول على معلومات المسابقة
+        contest = await self.db.get_contest(contest_id)
+        if not contest or contest['status'] != 'active':
+            if is_callback:
+                await update.callback_query.answer("❌ المسابقة منتهية!", show_alert=True)
+            else:
+                await update.message.reply_text("❌ المسابقة منتهية!")
+            return
+        
+        channel_id = contest['channel_id']
+        
+        # سجل للتحقق
+        logger.info(f"Checking subscriptions for user {user_id}")
+        logger.info(f"Official channel: {OFFICIAL_CHANNEL}")
+        logger.info(f"Contest channel: {channel_id}")
+        logger.info(f"Referrer ID: {referrer_id}")
+        
+        # التحقق من الاشتراك في القناتين
+        channels = [OFFICIAL_CHANNEL, channel_id]
+        is_subscribed, not_subscribed = await check_multiple_subscriptions(
+            context, user_id, channels
+        )
+        
+        logger.info(f"Not subscribed to: {not_subscribed}")
+        
+        if not_subscribed:
+            keyboard = []
+            
+            # إضافة أزرار الاشتراك لكل قناة غير مشترك فيها
+            for channel in not_subscribed:
+                clean_channel = channel.replace('@', '')
+                keyboard.append([
+                    InlineKeyboardButton(
+                        f"📢 اشترك في {channel}",
+                        url=f"https://t.me/{clean_channel}"
+                    )
+                ])
+            
+            keyboard.append([
+                InlineKeyboardButton(
+                    "✅ تحقق من الاشتراك",
+                    callback_data=f"check_ref_{contest_id}_{referrer_id or 0}"
+                )
+            ])
+            
+            # إنشاء قائمة القنوات المطلوبة
+            channels_list = "\n".join([f"• {ch}" for ch in not_subscribed])
+            
+            message_text = (
+                "⚠️ يجب الاشتراك في القنوات التالية أولاً:\n\n"
+                f"{channels_list}\n\n"
+                "اضغط على الأزرار أدناه للاشتراك، ثم اضغط 'تحقق من الاشتراك'"
+            )
+            
+            if is_callback:
+                await update.callback_query.answer()
+                await context.bot.send_message(
+                    chat_id=user_id,
+                    text=message_text,
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
+            else:
+                await update.message.reply_text(
+                    message_text,
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
+            return
+        
+        # التحقق من وجود المستخدم في المسابقة
+        async with aiosqlite.connect(self.db.db_name) as db:
+            async with db.execute('''
+                SELECT id, referral_code, referral_count, referred_by 
+                FROM referral_participants 
+                WHERE contest_id = ? AND user_id = ?
+            ''', (contest_id, user_id)) as cursor:
+                existing = await cursor.fetchone()
+        
+        # إذا دخل برابط شخص آخر (referrer_id موجود)
+        if referrer_id:
+            if existing:
+                # المستخدم موجود بالفعل - أرسل له رابطه
+                is_temp = existing[1] and existing[1].endswith('_temp')
+                
+                if is_temp:
+                    # لا يزال "إحالة فقط" - أخبره بالدخول من رابط المسابقة
+                    # الحصول على رابط المنشور
+                    contest_info = await self.db.get_contest(contest_id)
+                    settings = json.loads(contest_info['settings'])
+                    contest_post_link = settings.get('contest_post_link', f"https://t.me/{context.bot.username}?start=ref_{contest_id}")
+                    
+                    # تجنب مشاكل Markdown مع الروابط
+                    message_text = (
+                        f"✅ تم تسجيل دخولك!\n\n"
+                        f"💡 للحصول على رابط إحالة خاص بك والمشاركة في المسابقة،\n"
+                        f"يجب عليك الدخول من رابط المسابقة في القناة:\n\n"
+                        f"{contest_post_link}"
+                    )
+                else:
+                    # مشارك كامل
+                    referral_link = (
+                        f"https://t.me/{context.bot.username}"
+                        f"?start=ref_{contest_id}_{user_id}"
+                    )
+                    
+                    message_text = (
+                        f"✅ أنت مشترك بالفعل في المسابقة!\n\n"
+                        f"🔗 رابط الإحالة الخاص بك:\n"
+                        f"`{referral_link}`\n\n"
+                        f"👥 عدد إحالاتك: {existing[2]}"
+                    )
+            else:
+                # المستخدم جديد - سجله كإحالة فقط (بدون رابط أو منشور)
+                referral_code = f"ref_{contest_id}_{user_id}_temp"
+                
+                async with aiosqlite.connect(self.db.db_name) as db:
+                    await db.execute('''
+                        INSERT INTO referral_participants 
+                        (contest_id, user_id, username, referral_code, referred_by)
+                        VALUES (?, ?, ?, ?, ?)
+                    ''', (contest_id, user_id, username, referral_code, referrer_id))
+                    await db.commit()
+                
+                # زيادة عداد المُحيل
+                async with aiosqlite.connect(self.db.db_name) as db:
+                    await db.execute('''
+                        UPDATE referral_participants 
+                        SET referral_count = referral_count + 1 
+                        WHERE user_id = ? AND contest_id = ?
+                    ''', (referrer_id, contest_id))
+                    await db.commit()
+                
+                # تحديث منشور المُحيل
+                await self.update_user_post(context, contest_id, referrer_id)
+                
+                # إشعار المُحيل
+                try:
+                    await context.bot.send_message(
+                        chat_id=referrer_id,
+                        text=f"🎉 مبروك! حصلت على إحالة جديدة!\n"
+                             f"👤 المستخدم: @{username}"
+                    )
+                except TelegramError:
+                    pass
+                
+                # رسالة للمستخدم الجديد - استخدام رابط المنشور
+                contest_info = await self.db.get_contest(contest_id)
+                settings = json.loads(contest_info['settings'])
+                contest_post_link = settings.get('contest_post_link', f"https://t.me/{context.bot.username}?start=ref_{contest_id}")
+                
+                # تجنب مشاكل Markdown
+                message_text = (
+                    f"✅ تم تسجيل دخولك!\n\n"
+                    f"💡 للحصول على رابط إحالة خاص بك والمشاركة في المسابقة،\n"
+                    f"يجب عليك الدخول من رابط المسابقة في القناة:\n\n"
+                    f"{contest_post_link}"
+                )
+            
+            if is_callback:
+                await update.callback_query.answer()
+                await context.bot.send_message(
+                    chat_id=user_id,
+                    text=message_text
+                )
+            else:
+                await update.message.reply_text(
+                    message_text
+                )
+            return
+        
+        # إذا دخل من الرابط الأساسي (بدون referrer_id)
+        if existing:
+            # المستخدم موجود - التحقق إذا كان "إحالة فقط" أو "مشارك كامل"
+            is_temp = existing[1] and existing[1].endswith('_temp')  # referral_code
+            
+            if is_temp:
+                # ترقية من "إحالة فقط" إلى "مشارك كامل"
+                new_referral_code = f"ref_{contest_id}_{user_id}"
+                
+                async with aiosqlite.connect(self.db.db_name) as db:
+                    await db.execute('''
+                        UPDATE referral_participants 
+                        SET referral_code = ?
+                        WHERE contest_id = ? AND user_id = ?
+                    ''', (new_referral_code, contest_id, user_id))
+                    await db.commit()
+                
+                # نشر منشور في القناة
+                await self.publish_user_post(context, contest_id, user_id, username, channel_id)
+                
+                # إرسال رابط الإحالة
+                referral_link = (
+                    f"https://t.me/{context.bot.username}"
+                    f"?start=ref_{contest_id}_{user_id}"
+                )
+                
+                message_text = (
+                    f"🎉 مبروك! تمت ترقيتك إلى مشارك رسمي!\n\n"
+                    f"🔗 رابط الإحالة الخاص بك:\n"
+                    f"`{referral_link}`\n\n"
+                    f"👥 عدد إحالاتك: {existing[2]}\n\n"
+                    f"شارك هذا الرابط مع أصدقائك للحصول على نقاط!"
+                )
+            else:
+                # مشارك كامل بالفعل
+                referral_link = (
+                    f"https://t.me/{context.bot.username}"
+                    f"?start=ref_{contest_id}_{user_id}"
+                )
+                
+                message_text = (
+                    f"✅ أنت مشترك بالفعل!\n\n"
+                    f"🔗 رابط الإحالة الخاص بك:\n"
+                    f"`{referral_link}`\n\n"
+                    f"👥 عدد إحالاتك: {existing[2]}"
+                )
+            
+            if is_callback:
+                await update.callback_query.answer()
+                await context.bot.send_message(
+                    chat_id=user_id,
+                    text=message_text,
+                    parse_mode=ParseMode.MARKDOWN
+                )
+            else:
+                await update.message.reply_text(
+                    message_text,
+                    parse_mode=ParseMode.MARKDOWN
+                )
+            return
+        
+        # مستخدم جديد - إنشاء حساب كامل مع رابط ومنشور
+        referral_code = f"ref_{contest_id}_{user_id}"
+        
+        async with aiosqlite.connect(self.db.db_name) as db:
+            await db.execute('''
+                INSERT INTO referral_participants 
+                (contest_id, user_id, username, referral_code, referred_by)
+                VALUES (?, ?, ?, ?, NULL)
+            ''', (contest_id, user_id, username, referral_code))
+            await db.commit()
+        
+        # نشر منشور في القناة
+        await self.publish_user_post(context, contest_id, user_id, username, channel_id)
+        
+        # إرسال رابط الإحالة
+        referral_link = (
+            f"https://t.me/{context.bot.username}"
+            f"?start=ref_{contest_id}_{user_id}"
+        )
+        
+        message_text = (
+            f"✅ تم الانضمام بنجاح!\n\n"
+            f"🔗 رابط الإحالة الخاص بك:\n"
+            f"`{referral_link}`\n\n"
+            f"شارك هذا الرابط مع أصدقائك للحصول على نقاط!"
+        )
+        
+        if is_callback:
+            await update.callback_query.answer()
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=message_text,
+                parse_mode=ParseMode.MARKDOWN
             )
         else:
             await update.message.reply_text(
-                "❌ نوع غير مدعوم! أرسل نص، صورة، أو ملف.",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ إلغاء", callback_data='admin_panel')]])
+                message_text,
+                parse_mode=ParseMode.MARKDOWN
             )
-            return
-        
-        context.user_data.clear()
     
-    elif state == 'broadcast':
-        if user_id != ADMIN_ID or not text:
-            return
-        
-        conn = sqlite3.connect('points_bot.db')
-        c = conn.cursor()
-        c.execute('SELECT user_id FROM users')
-        users = c.fetchall()
-        conn.close()
-        
-        success = 0
-        failed = 0
-        
-        for user in users:
-            try:
-                await context.bot.send_message(user[0], text)
-                success += 1
-            except:
-                failed += 1
-        
-        await update.message.reply_text(
-            f"✅ تمت الإذاعة!\n\n"
-            f"نجح: {success}\n"
-            f"فشل: {failed}",
-            reply_markup=admin_keyboard()
-        )
-        context.user_data.clear()
-    
-    elif state == 'add_channel':
-        if user_id != ADMIN_ID or not text:
-            return
-        
-        if not text.startswith('@'):
-            await update.message.reply_text("❌ المعرف يجب أن يبدأ بـ @")
-            return
-        
-        channel_username = text[1:]
-        try:
-            chat = await context.bot.get_chat(f"@{channel_username}")
-            add_channel(str(chat.id), channel_username)
-            await update.message.reply_text(
-                f"✅ تم إضافة القناة @{channel_username}",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data='manage_channels')]])
+    async def publish_user_post(
+        self,
+        context: ContextTypes.DEFAULT_TYPE,
+        contest_id: int,
+        user_id: int,
+        username: str,
+        channel_id: str
+    ):
+        """نشر منشور المشترك في القناة"""
+        keyboard = [[
+            InlineKeyboardButton(
+                "👥 عدد الإحالات: 0",
+                callback_data=f"ref_count_{contest_id}_{user_id}"
             )
-        except Exception as e:
-            await update.message.reply_text(f"❌ خطأ: {str(e)}")
+        ]]
         
-        context.user_data.clear()
-    
-    elif state == 'gift_code_points':
-        if user_id != ADMIN_ID:
-            return
+        display_name = f"@{username}" if not username.startswith('user_') else f"ID: {user_id}"
         
-        if not text or not text.isdigit():
-            await update.message.reply_text("❌ أرسل رقماً صحيحاً!")
-            return
-        
-        context.user_data['gift_points'] = int(text)
-        context.user_data['state'] = 'gift_code_uses'
-        await update.message.reply_text(
-            "أرسل عدد مرات الاستخدام:",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ إلغاء", callback_data='admin_panel')]])
-        )
-    
-    elif state == 'gift_code_uses':
-        if user_id != ADMIN_ID:
-            return
-        
-        if not text or not text.isdigit():
-            await update.message.reply_text("❌ أرسل رقماً صحيحاً!")
-            return
-        
-        points = context.user_data['gift_points']
-        max_uses = int(text)
-        
-        code = ''.join(random.choices('ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789', k=8))
-        
-        conn = sqlite3.connect('points_bot.db')
-        c = conn.cursor()
-        c.execute('INSERT INTO gift_codes (code, points, max_uses) VALUES (?, ?, ?)',
-                  (code, points, max_uses))
-        conn.commit()
-        conn.close()
-        
-        bot_username = (await context.bot.get_me()).username
-        link = f"https://t.me/{bot_username}?start=gift{code}"
-        
-        await update.message.reply_text(
-            f"✅ تم إنشاء الكود!\n\n"
-            f"🎁 الكود: `{code}`\n"
-            f"💎 النقاط: {points}\n"
-            f"👥 الاستخدامات: {max_uses}\n\n"
-            f"🔗 الرابط:\n`{link}`",
-            parse_mode='Markdown',
-            reply_markup=admin_keyboard()
-        )
-        context.user_data.clear()
-    
-    elif state == 'edit_referral_points':
-        if user_id != ADMIN_ID:
-            return
-        
-        if not text or not text.isdigit():
-            await update.message.reply_text("❌ أرسل رقماً صحيحاً!")
-            return
-        
-        set_setting('referral_points', text)
-        await update.message.reply_text(
-            f"✅ تم تحديث نقاط الإحالة إلى {text}",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data='admin_settings')]])
-        )
-        context.user_data.clear()
-    
-    elif state == 'edit_transfer_fee':
-        if user_id != ADMIN_ID:
-            return
-        
-        if not text or not text.isdigit():
-            await update.message.reply_text("❌ أرسل رقماً صحيحاً!")
-            return
-        
-        set_setting('transfer_fee', text)
-        await update.message.reply_text(
-            f"✅ تم تحديث رسوم التحويل إلى {text}",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data='admin_settings')]])
-        )
-        context.user_data.clear()
-    
-    elif state == 'edit_stars_ratio':
-        if user_id != ADMIN_ID:
-            return
-        
-        if not text or not text.isdigit():
-            await update.message.reply_text("❌ أرسل رقماً صحيحاً!")
-            return
-        
-        set_setting('stars_ratio', text)
-        await update.message.reply_text(
-            f"✅ تم تحديث نسبة النجوم إلى {text} نقطة لكل نجمة",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data='admin_settings')]])
-        )
-        context.user_data.clear()
-    
-    elif state == 'edit_welcome':
-        if user_id != ADMIN_ID or not text:
-            return
-        
-        set_setting('welcome_message', text)
-        await update.message.reply_text(
-            "✅ تم تحديث رسالة الترحيب",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data='admin_settings')]])
-        )
-        context.user_data.clear()
-    
-    elif state == 'edit_fixed_gift':
-        if user_id != ADMIN_ID:
-            return
-        
-        if not text or not text.isdigit():
-            await update.message.reply_text("❌ أرسل رقماً صحيحاً!")
-            return
-        
-        set_setting('daily_gift_points', text)
-        await update.message.reply_text(
-            f"✅ تم تحديث الهدية اليومية إلى {text} نقطة",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data='admin_settings')]])
-        )
-        context.user_data.clear()
-    
-    elif state == 'edit_random_gift_min':
-        if user_id != ADMIN_ID:
-            return
-        
-        if not text or not text.isdigit():
-            await update.message.reply_text("❌ أرسل رقماً صحيحاً!")
-            return
-        
-        context.user_data['gift_min'] = text
-        context.user_data['state'] = 'edit_random_gift_max'
-        await update.message.reply_text(
-            "أرسل الحد الأقصى للنقاط:",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ إلغاء", callback_data='admin_settings')]])
-        )
-    
-    elif state == 'edit_random_gift_max':
-        if user_id != ADMIN_ID:
-            return
-        
-        if not text or not text.isdigit():
-            await update.message.reply_text("❌ أرسل رقماً صحيحاً!")
-            return
-        
-        min_val = context.user_data['gift_min']
-        set_setting('daily_gift_min', min_val)
-        set_setting('daily_gift_max', text)
-        
-        await update.message.reply_text(
-            f"✅ تم تحديث الهدية العشوائية من {min_val} إلى {text} نقطة",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data='admin_settings')]])
-        )
-        context.user_data.clear()
-    
-    elif state == 'search_product':
-        if not text:
-            return
-        
-        search_term = text.lower()
-        products = get_products()
-        results = [p for p in products if search_term in p[1].lower()]
-        
-        if not results:
-            await update.message.reply_text(
-                "❌ لم يتم العثور على منتجات!",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع للمتجر", callback_data='shop')]])
-            )
-            context.user_data.clear()
-            return
-        
-        user = get_user(user_id)
-        user_points = user[2] if user else 0
-        
-        keyboard = []
-        for product in results:
-            emoji = "✅" if user_points >= product[2] else "❌"
-            keyboard.append([InlineKeyboardButton(
-                f"{emoji} {product[1]} - {product[2]} نقطة",
-                callback_data=f'buy_{product[0]}'
-            )])
-        keyboard.append([InlineKeyboardButton("🔙 رجوع للمتجر", callback_data='shop')])
-        
-        await update.message.reply_text(
-            f"🔍 نتائج البحث: {len(results)}\n💰 رصيدك: {user_points} نقطة",
+        message = await context.bot.send_message(
+            chat_id=channel_id,
+            text=f"🎯 {display_name} انضم للمسابقة!",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
-        context.user_data.clear()
-
-# معالجة الدفع
-async def precheckout_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.pre_checkout_query
-    await query.answer(ok=True)
-
-async def successful_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    payment = update.message.successful_payment
-    payload = payment.invoice_payload
-    
-    if payload.startswith('stars_'):
-        parts = payload.split('_')
-        user_id = int(parts[1])
-        points = int(parts[2])
         
-        update_points(user_id, points)
-        add_transaction(user_id, 'purchase_stars', points, f'شراء بـ {payment.total_amount} نجمة')
+        # حفظ معرف الرسالة
+        async with aiosqlite.connect(self.db.db_name) as db:
+            await db.execute('''
+                UPDATE referral_participants 
+                SET message_id = ? 
+                WHERE user_id = ? AND contest_id = ?
+            ''', (message.message_id, user_id, contest_id))
+            await db.commit()
+    
+    async def update_user_post(
+        self,
+        context: ContextTypes.DEFAULT_TYPE,
+        contest_id: int,
+        user_id: int
+    ):
+        """تحديث منشور المستخدم"""
+        async with aiosqlite.connect(self.db.db_name) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute('''
+                SELECT rp.*, c.channel_id 
+                FROM referral_participants rp
+                JOIN contests c ON rp.contest_id = c.id
+                WHERE rp.user_id = ? AND rp.contest_id = ?
+            ''', (user_id, contest_id)) as cursor:
+                participant = await cursor.fetchone()
+        
+        if not participant or not participant['message_id']:
+            return
+        
+        keyboard = [[
+            InlineKeyboardButton(
+                f"👥 عدد الإحالات: {participant['referral_count']}",
+                callback_data=f"ref_count_{contest_id}_{user_id}"
+            )
+        ]]
+        
+        username = participant['username']
+        display_name = f"@{username}" if not username.startswith('user_') else f"ID: {user_id}"
+        
+        try:
+            await context.bot.edit_message_text(
+                chat_id=participant['channel_id'],
+                message_id=participant['message_id'],
+                text=f"🎯 {display_name} انضم للمسابقة!",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+        except TelegramError:
+            pass
+    
+    async def check_subscriptions_task(
+        self,
+        context: ContextTypes.DEFAULT_TYPE
+    ):
+        """مهمة دورية للتحقق من الاشتراكات"""
+        async with aiosqlite.connect(self.db.db_name) as db:
+            db.row_factory = aiosqlite.Row
+            
+            # الحصول على جميع المشتركين النشطين
+            async with db.execute('''
+                SELECT rp.*, c.channel_id
+                FROM referral_participants rp
+                JOIN contests c ON rp.contest_id = c.id
+                WHERE c.status = 'active'
+            ''') as cursor:
+                participants = await cursor.fetchall()
+        
+        for participant in participants:
+            user_id = participant['user_id']
+            contest_id = participant['contest_id']
+            channel_id = participant['channel_id']
+            
+            # التحقق من الاشتراك في القناتين
+            channels = [OFFICIAL_CHANNEL, channel_id]
+            is_subscribed, _ = await check_multiple_subscriptions(
+                context, user_id, channels
+            )
+            
+            if not is_subscribed:
+                # حذف إحالاته من المُحيل
+                if participant['referred_by']:
+                    async with aiosqlite.connect(self.db.db_name) as db:
+                        await db.execute('''
+                            UPDATE referral_participants 
+                            SET referral_count = referral_count - 1 
+                            WHERE user_id = ? AND contest_id = ?
+                        ''', (participant['referred_by'], contest_id))
+                        await db.commit()
+                    
+                    # تحديث منشور المُحيل
+                    await self.update_user_post(
+                        context, contest_id, participant['referred_by']
+                    )
+                
+                # حذف المستخدم
+                async with aiosqlite.connect(self.db.db_name) as db:
+                    await db.execute('''
+                        DELETE FROM referral_participants 
+                        WHERE id = ?
+                    ''', (participant['id'],))
+                    await db.commit()
+                
+                logger.info(
+                    f"Removed user {user_id} from referral contest "
+                    f"{contest_id} for leaving channels"
+                )
+    
+    async def publish_leaderboard(
+        self,
+        context: ContextTypes.DEFAULT_TYPE,
+        contest_id: int
+    ):
+        """نشر لوحة المتصدرين"""
+        contest = await self.db.get_contest(contest_id)
+        if not contest:
+            return
+        
+        channel_id = contest['channel_id']
+        
+        # الحصول على أفضل 10
+        async with aiosqlite.connect(self.db.db_name) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute('''
+                SELECT user_id, username, referral_count 
+                FROM referral_participants 
+                WHERE contest_id = ?
+                ORDER BY referral_count DESC
+                LIMIT 10
+            ''', (contest_id,)) as cursor:
+                top_participants = await cursor.fetchall()
+        
+        if not top_participants:
+            return
+        
+        # تنسيق اللوحة
+        leaderboard_text = "🏆 *لوحة المتصدرين*\n\n"
+        
+        for i, participant in enumerate(top_participants, 1):
+            username = participant['username']
+            user_id = participant['user_id']
+            count = participant['referral_count']
+            
+            medal = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else f"{i}."
+            
+            if username.startswith('user_'):
+                leaderboard_text += f"{medal} ID: `{user_id}` - {count} إحالة\n"
+            else:
+                leaderboard_text += f"{medal} @{username} - {count} إحالة\n"
+        
+        # نشر اللوحة
+        await context.bot.send_message(
+            chat_id=channel_id,
+            text=leaderboard_text,
+            parse_mode=ParseMode.MARKDOWN
+        )
+    
+    async def end_contest(
+        self,
+        context: ContextTypes.DEFAULT_TYPE,
+        contest_id: int
+    ):
+        """إنهاء المسابقة ونشر النتائج"""
+        contest = await self.db.get_contest(contest_id)
+        if not contest:
+            return
+        
+        channel_id = contest['channel_id']
+        
+        logger.info(f"Starting final subscription check for referral contest {contest_id}")
+        
+        # الفحص النهائي: حذف جميع المشاركين غير المشتركين
+        async with aiosqlite.connect(self.db.db_name) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute('''
+                SELECT id, user_id, referred_by, referral_count
+                FROM referral_participants 
+                WHERE contest_id = ?
+            ''', (contest_id,)) as cursor:
+                all_participants = await cursor.fetchall()
+        
+        # التحقق من اشتراك كل مشارك
+        removed_count = 0
+        for participant in all_participants:
+            user_id = participant['user_id']
+            
+            # التحقق من الاشتراك في القناتين
+            channels = [OFFICIAL_CHANNEL, channel_id]
+            is_subscribed, _ = await check_multiple_subscriptions(
+                context, user_id, channels
+            )
+            
+            if not is_subscribed:
+                # إذا كان لديه من أحاله، خصم الإحالة من المُحيل
+                if participant['referred_by']:
+                    async with aiosqlite.connect(self.db.db_name) as db:
+                        await db.execute('''
+                            UPDATE referral_participants 
+                            SET referral_count = referral_count - 1 
+                            WHERE user_id = ? AND contest_id = ?
+                        ''', (participant['referred_by'], contest_id))
+                        await db.commit()
+                
+                # خصم إحالاته من العداد (لأنهم سيُحذفون أيضاً إذا لم يكونوا مشتركين)
+                # لكن لن نفعل شيء هنا لأن الحلقة ستتعامل مع كل مشارك
+                
+                # حذف المشارك
+                async with aiosqlite.connect(self.db.db_name) as db:
+                    await db.execute('''
+                        DELETE FROM referral_participants 
+                        WHERE id = ?
+                    ''', (participant['id'],))
+                    await db.commit()
+                
+                removed_count += 1
+                logger.info(f"Removed participant {user_id} (not subscribed)")
+        
+        if removed_count > 0:
+            logger.info(f"Removed {removed_count} participants from unsubscribed users")
+            
+            # تحديث عدادات الإحالات بعد الحذف
+            # حساب العدد الصحيح لكل مشارك
+            async with aiosqlite.connect(self.db.db_name) as db:
+                # الحصول على جميع المشاركين المتبقين
+                async with db.execute('''
+                    SELECT user_id 
+                    FROM referral_participants 
+                    WHERE contest_id = ?
+                ''', (contest_id,)) as cursor:
+                    remaining = await cursor.fetchall()
+                
+                # إعادة حساب عدد الإحالات لكل مشارك
+                for participant in remaining:
+                    async with db.execute('''
+                        SELECT COUNT(*) 
+                        FROM referral_participants 
+                        WHERE contest_id = ? AND referred_by = ?
+                    ''', (contest_id, participant['user_id'])) as cursor:
+                        count = (await cursor.fetchone())[0]
+                    
+                    await db.execute('''
+                        UPDATE referral_participants 
+                        SET referral_count = ? 
+                        WHERE contest_id = ? AND user_id = ?
+                    ''', (count, contest_id, participant['user_id']))
+                
+                await db.commit()
+        
+        # نشر لوحة المتصدرين النهائية
+        await self.publish_leaderboard(context, contest_id)
+        
+        # إنهاء المسابقة
+        await self.db.end_contest(contest_id)
+        
+        logger.info(f"Referral contest {contest_id} ended successfully")
+
+# ═══════════════════════════════════════════════════════════════
+# 🎮 معالجات الأوامر والرسائل
+# ═══════════════════════════════════════════════════════════════
+
+# متغيرات عامة
+db = Database(DATABASE_NAME)
+voting_contest = VotingContest(db)
+lucky_wheel = LuckyWheelContest(db)
+referral_contest = ReferralContest(db)
+
+# حالات المحادثة
+user_states: Dict[int, dict] = {}
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """معالج أمر /start"""
+    user_id = update.effective_user.id
+    
+    # التحقق من وجود معامل (رابط إحالة)
+    if context.args:
+        param = context.args[0]
+        
+        if param.startswith('ref_'):
+            parts = param.split('_')
+            if len(parts) >= 2:
+                contest_id = int(parts[1])
+                referrer_id = int(parts[2]) if len(parts) > 2 else None
+                
+                await referral_contest.handle_referral_join(
+                    update, context, contest_id, referrer_id
+                )
+                return
+    
+    # الرسالة الترحيبية
+    keyboard = [
+        [InlineKeyboardButton("🗳️ مسابقة تصويت", callback_data="create_voting")],
+        [InlineKeyboardButton("🎰 عجلة الحظ", callback_data="create_lucky")],
+        [InlineKeyboardButton("🔗 مسابقة إحالات", callback_data="create_referral")],
+        [InlineKeyboardButton("📋 مسابقاتي", callback_data="my_contests")],
+        [InlineKeyboardButton("❌ إيقاف مسابقة", callback_data="end_contest")],
+    ]
+    
+    await update.message.reply_text(
+        "🎯 *مرحباً في بوت المسابقات المتقدم!*\n\n"
+        "اختر نوع المسابقة التي تريد إنشاءها:",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+async def done_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """معالج أمر /done لإنهاء إضافة المتسابقين"""
+    user_id = update.effective_user.id
+    
+    if user_id not in user_states:
+        return
+    
+    state_info = user_states[user_id]
+    
+    if state_info.get('state') == 'waiting_voting_participants':
+        if 'contest_id' not in state_info:
+            await update.message.reply_text("❌ لم تقم بإضافة أي متسابقين بعد!")
+            return
+        
+        # التحقق من وجود متسابقين
+        async with aiosqlite.connect(db.db_name) as db_conn:
+            async with db_conn.execute('''
+                SELECT COUNT(*) FROM voting_participants 
+                WHERE contest_id = ?
+            ''', (state_info['contest_id'],)) as cursor:
+                count = (await cursor.fetchone())[0]
+        
+        if count < 2:
+            await update.message.reply_text(
+                "❌ يجب إضافة متسابقين على الأقل!\n"
+                "أرسل أسماء إضافية أو /cancel للإلغاء"
+            )
+            return
         
         await update.message.reply_text(
-            f"✅ تم الدفع بنجاح!\n\n"
-            f"💎 حصلت على {points} نقطة",
-            reply_markup=main_keyboard(user_id)
+            f"✅ تم إنشاء مسابقة التصويت بنجاح!\n"
+            f"📊 عدد المتسابقين: {count}\n"
+            f"تم نشرهم جميعًا في القناة."
         )
         
+        del user_states[user_id]
+
+async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """معالج أمر /cancel لإلغاء العملية الحالية"""
+    user_id = update.effective_user.id
+    
+    if user_id in user_states:
+        state_info = user_states[user_id]
+        
+        # حذف المسابقة إذا كانت قيد الإنشاء
+        if 'contest_id' in state_info:
+            contest_id = state_info['contest_id']
+            async with aiosqlite.connect(db.db_name) as db_conn:
+                await db_conn.execute('DELETE FROM contests WHERE id = ?', (contest_id,))
+                await db_conn.execute('DELETE FROM voting_participants WHERE contest_id = ?', (contest_id,))
+                await db_conn.commit()
+        
+        del user_states[user_id]
+        await update.message.reply_text("❌ تم إلغاء العملية.")
+    else:
+        await update.message.reply_text("لا توجد عملية جارية للإلغاء.")
+
+async def skip_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """معالج أمر /skip للتخطي"""
+    user_id = update.effective_user.id
+    
+    if user_id not in user_states:
+        return
+    
+    state_info = user_states[user_id]
+    
+    # معالجة التخطي حسب الحالة
+    if state_info.get('state') == 'waiting_lucky_message':
+        state_info['custom_message'] = None
+        state_info['state'] = 'waiting_lucky_max'
+        
+        await update.message.reply_text(
+            "⏭️ تم التخطي\n\n"
+            "🔢 أرسل العدد الأقصى للمشتركين:\n"
+            "(مثال: 100)"
+        )
+
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """معالج الأزرار"""
+    query = update.callback_query
+    data = query.data
+    user_id = query.from_user.id
+    
+    # مسابقة التصويت
+    if data.startswith('vote_'):
+        await voting_contest.handle_vote(update, context)
+        return
+    
+    # عجلة الحظ
+    if data.startswith('lucky_join_'):
+        await lucky_wheel.handle_join(update, context)
+        return
+    
+    # التحقق من الاشتراك للإحالة
+    if data.startswith('check_ref_'):
+        parts = data.split('_')
+        contest_id = int(parts[2])
+        referrer_id = int(parts[3]) if parts[3] != '0' else None
+        
+        # إعادة محاولة الانضمام
+        await referral_contest.handle_referral_join(
+            update, context, contest_id, referrer_id
+        )
+        return
+    
+    # إنشاء مسابقة تصويت
+    if data == 'create_voting':
+        await query.answer()
+        user_states[user_id] = {'state': 'waiting_voting_channel'}
+        await query.message.reply_text(
+            "📢 أرسل معرف القناة (مثال: @channelname)\n"
+            "تأكد من رفع البوت كمشرف مع صلاحية النشر!"
+        )
+        return
+    
+    # إنشاء عجلة حظ
+    if data == 'create_lucky':
+        await query.answer()
+        user_states[user_id] = {'state': 'waiting_lucky_channel'}
+        await query.message.reply_text(
+            "📢 أرسل معرف القناة (مثال: @channelname)\n"
+            "تأكد من رفع البوت كمشرف مع صلاحية النشر!"
+        )
+        return
+    
+    # إنشاء مسابقة إحالات
+    if data == 'create_referral':
+        await query.answer()
+        user_states[user_id] = {'state': 'waiting_referral_channel'}
+        await query.message.reply_text(
+            "📢 أرسل معرف القناة (مثال: @channelname)\n"
+            "تأكد من رفع البوت كمشرف مع صلاحية النشر!"
+        )
+        return
+    
+    # عرض المسابقات
+    if data == 'my_contests':
+        await query.answer()
+        contests = await db.get_active_contests_by_owner(user_id)
+        
+        if not contests:
+            await query.message.reply_text("ليس لديك مسابقات نشطة حالياً.")
+            return
+        
+        text = "📋 مسابقاتك النشطة:\n\n"
+        for contest in contests:
+            contest_type = {
+                'voting': '🗳️ تصويت',
+                'lucky_wheel': '🎰 عجلة حظ',
+                'referral': '🔗 إحالات'
+            }.get(contest['contest_type'], contest['contest_type'])
+            
+            text += f"• {contest_type} - القناة: {contest['channel_id']}\n"
+        
+        await query.message.reply_text(text)
+        return
+    
+    # إيقاف مسابقة
+    if data == 'end_contest':
+        await query.answer()
+        contests = await db.get_active_contests_by_owner(user_id)
+        
+        if not contests:
+            await query.message.reply_text("ليس لديك مسابقات نشطة لإيقافها.")
+            return
+        
+        keyboard = []
+        for contest in contests:
+            contest_type = {
+                'voting': '🗳️',
+                'lucky_wheel': '🎰',
+                'referral': '🔗'
+            }.get(contest['contest_type'], '')
+            
+            keyboard.append([
+                InlineKeyboardButton(
+                    f"{contest_type} {contest['channel_id']}",
+                    callback_data=f"confirm_end_{contest['id']}"
+                )
+            ])
+        
+        await query.message.reply_text(
+            "اختر المسابقة التي تريد إيقافها:",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        return
+    
+    # تأكيد إيقاف المسابقة
+    if data.startswith('confirm_end_'):
+        await query.answer()
+        contest_id = int(data.split('_')[2])
+        
+        contest = await db.get_contest(contest_id)
+        if not contest or contest['owner_id'] != user_id:
+            await query.message.reply_text("❌ غير مسموح!")
+            return
+        
+        # إنهاء حسب النوع
+        if contest['contest_type'] == 'voting':
+            await voting_contest.end_contest(context, contest_id)
+        elif contest['contest_type'] == 'lucky_wheel':
+            await lucky_wheel.draw_winners(context, contest_id)
+        elif contest['contest_type'] == 'referral':
+            await referral_contest.end_contest(context, contest_id)
+        
+        await query.message.reply_text("✅ تم إنهاء المسابقة بنجاح!")
+        return
+
+async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """معالج الرسائل النصية"""
+    user_id = update.effective_user.id
+    text = update.message.text
+    
+    if user_id not in user_states:
+        return
+    
+    state_info = user_states[user_id]
+    state = state_info.get('state')
+    
+    # ══════ مسابقة التصويت ══════
+    if state == 'waiting_voting_channel':
+        if not text.startswith('@'):
+            await update.message.reply_text("❌ يجب أن يبدأ المعرف بـ @")
+            return
+        
+        state_info['channel_id'] = text
+        state_info['state'] = 'waiting_voting_participants'
+        
+        await update.message.reply_text(
+            "👥 أرسل اسم المتسابق الأول:\n\n"
+            "💡 بعد كل اسم سيتم نشره مباشرة في القناة\n"
+            "استخدم /done عند الانتهاء من إضافة جميع المتسابقين"
+        )
+        return
+    
+    if state == 'waiting_voting_participants':
+        # إنشاء المسابقة إذا لم تكن موجودة
+        if 'contest_id' not in state_info:
+            contest_id = await voting_contest.create(
+                user_id, state_info['channel_id'], []
+            )
+            state_info['contest_id'] = contest_id
+            await update.message.reply_text(
+                "✅ تم إنشاء المسابقة!\n\n"
+                "📝 يمكنك الآن إرسال أسماء المتسابقين واحدًا تلو الآخر\n"
+                "أرسل /done عندما تنتهي"
+            )
+            return
+        
+        # إضافة المتسابق الجديد
+        participant_name = text.strip()
+        if not participant_name:
+            return
+        
+        contest_id = state_info['contest_id']
+        
+        # إضافة المتسابق للقاعدة
+        async with aiosqlite.connect(db.db_name) as db_conn:
+            cursor = await db_conn.execute('''
+                INSERT INTO voting_participants (contest_id, name)
+                VALUES (?, ?)
+            ''', (contest_id, participant_name))
+            await db_conn.commit()
+            participant_id = cursor.lastrowid
+        
+        # نشر المتسابق في القناة
+        keyboard = [[
+            InlineKeyboardButton(
+                "❤️ صوّت", 
+                callback_data=f"vote_{participant_id}"
+            )
+        ]]
+        
+        message = await context.bot.send_message(
+            chat_id=state_info['channel_id'],
+            text=f"🎯 المتسابق: {participant_name}\n\n"
+                 f"❤️ عدد الأصوات: 0",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        
+        # حفظ معرف الرسالة
+        async with aiosqlite.connect(db.db_name) as db_conn:
+            await db_conn.execute('''
+                UPDATE voting_participants 
+                SET message_id = ? 
+                WHERE id = ?
+            ''', (message.message_id, participant_id))
+            await db_conn.commit()
+        
+        await update.message.reply_text(
+            f"✅ تمت إضافة: {participant_name}\n\n"
+            "📝 أرسل اسم متسابق آخر أو /done للإنهاء"
+        )
+        return
+    
+    # ══════ عجلة الحظ ══════
+    if state == 'waiting_lucky_channel':
+        if not text.startswith('@'):
+            await update.message.reply_text("❌ يجب أن يبدأ المعرف بـ @")
+            return
+        
+        state_info['channel_id'] = text
+        state_info['state'] = 'waiting_lucky_message'
+        
+        await update.message.reply_text(
+            "📝 أرسل نص المسابقة (اختياري):\n\n"
+            "مثال: 🎁 الجائزة: 100 دولار\n\n"
+            "أو أرسل /skip للتخطي"
+        )
+        return
+    
+    if state == 'waiting_lucky_message':
+        custom_message = text.strip() if text.strip() != '/skip' else None
+        state_info['custom_message'] = custom_message
+        state_info['state'] = 'waiting_lucky_max'
+        
+        await update.message.reply_text(
+            "🔢 أرسل العدد الأقصى للمشتركين:\n"
+            "(مثال: 100)"
+        )
+        return
+    
+    if state == 'waiting_lucky_max':
         try:
-            buyer = update.message.from_user
-            buyer_username = f"@{buyer.username}" if buyer.username else "لا يوجد"
-            buyer_name = buyer.first_name + (" " + buyer.last_name if buyer.last_name else "")
-            buyer_link = f"tg://user?id={user_id}"
-            charge_id = payment.telegram_payment_charge_id
-            
-            conn = sqlite3.connect('points_bot.db')
-            c = conn.cursor()
-            created_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            c.execute('INSERT INTO refund_requests (user_id, charge_id, created_at) VALUES (?, ?, ?)',
-                      (user_id, charge_id, created_at))
-            conn.commit()
-            refund_id = c.lastrowid
-            conn.close()
-            
-            refund_keyboard = InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔄 استرداد النجوم", callback_data=f'refund_{refund_id}')
-            ]])
-            
-            admin_notification = (
-                f"⭐ عملية شراء نجوم!\n\n"
-                f"👤 المشتري: {buyer_name}\n"
-                f"🆔 ID: `{user_id}`\n"
-                f"👁️ الرابط: [فتح الملف الشخصي]({buyer_link})\n"
-                f"📱 المعرف: {buyer_username}\n\n"
-                f"💫 النجوم المشتراة: {payment.total_amount}\n"
-                f"💎 النقاط المضافة: {points}\n"
-                f"🔑 Charge ID:\n`{charge_id}`\n\n"
-                f"🕐 الوقت: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-                f"💡 للاسترداد اليدوي استخدم:\n"
-                f"`/refund {user_id} {charge_id}`"
-            )
-            
-            await context.bot.send_message(
-                ADMIN_ID,
-                admin_notification,
-                parse_mode='Markdown',
-                reply_markup=refund_keyboard
-            )
-        except Exception as e:
-            logger.error(f"فشل إرسال إشعار للمشرف: {e}")
-
-# أمر لوحة التحكم
-async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("❌ غير مصرح لك!")
-        return
-    
-    await update.message.reply_text("🎛️ لوحة التحكم", reply_markup=admin_keyboard())
-
-# أمر استرداد النجوم يدوياً
-async def refund_stars(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    
-    if user_id != ADMIN_ID:
-        await update.message.reply_text("⛔ ليس لديك صلاحية استخدام هذا الأمر!")
-        return
-    
-    if len(context.args) < 2:
-        help_text = (
-            "❌ **استخدام خاطئ!**\n\n"
-            "**الصيغة الصحيحة:**\n"
-            "`/refund <user_id> <charge_id>`\n\n"
-            "**مثال:**\n"
-            "`/refund 123456789 stxcOxjT5P_KLsQNzOYz...`\n\n"
-            "**📝 كيف تحصل على المعلومات:**\n"
-            "• **User ID**: من إشعار الشراء\n"
-            "• **Charge ID**: رقم المعاملة من إشعار الدفع\n\n"
-            "**⏰ ملاحظة:**\n"
-            "يمكن إرجاع النجوم خلال 180 يومًا من تاريخ الدفع"
-        )
-        await update.message.reply_text(help_text, parse_mode='Markdown')
-        return
-    
-    try:
-        target_user_id = int(context.args[0])
-        charge_id = " ".join(context.args[1:])
-    except ValueError:
-        await update.message.reply_text("❌ معرف المستخدم يجب أن يكون رقمًا!")
-        return
-    
-    loading_msg = await update.message.reply_text("⏳ جاري محاولة إرجاع النجوم...")
-    
-    try:
-        await context.bot.refund_star_payment(
-            user_id=target_user_id,
-            telegram_payment_charge_id=charge_id
-        )
+            max_participants = int(text)
+            if max_participants < 2:
+                raise ValueError()
+        except ValueError:
+            await update.message.reply_text("❌ يجب إدخال رقم صحيح أكبر من 1!")
+            return
         
-        success_text = (
-            f"✅ **تم إرجاع النجوم بنجاح!**\n\n"
-            f"👤 **معرف المستخدم:** `{target_user_id}`\n"
-            f"🆔 **رقم المعاملة:**\n`{charge_id}`\n"
-            f"⏰ **وقت الاسترداد:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-            f"💡 تم إرجاع النجوم للمستخدم!"
-        )
-        await loading_msg.edit_text(success_text, parse_mode='Markdown')
+        state_info['max_participants'] = max_participants
+        state_info['state'] = 'waiting_lucky_winners'
         
+        await update.message.reply_text(
+            "🏆 أرسل عدد الفائزين:\n"
+            "(مثال: 3)"
+        )
+        return
+    
+    if state == 'waiting_lucky_winners':
         try:
-            await context.bot.send_message(
-                chat_id=target_user_id,
-                text=(
-                    f"💰 **تم إرجاع النجوم إلى حسابك!**\n\n"
-                    f"🆔 رقم المعاملة:\n`{charge_id}`\n\n"
-                    f"شكرًا لتعاملك معنا! 💫"
-                ),
-                parse_mode='Markdown'
+            winners_count = int(text)
+            if winners_count < 1 or winners_count > state_info['max_participants']:
+                raise ValueError()
+        except ValueError:
+            await update.message.reply_text(
+                f"❌ يجب إدخال رقم بين 1 و {state_info['max_participants']}!"
             )
-        except Exception as e:
-            logger.warning(f"لم يتم إرسال إشعار للمستخدم: {e}")
+            return
         
-    except Exception as e:
-        error_message = str(e)
+        # إنشاء المسابقة
+        contest_id = await lucky_wheel.create(
+            user_id,
+            state_info['channel_id'],
+            state_info['max_participants'],
+            winners_count,
+            state_info.get('custom_message')
+        )
         
-        if "CHARGE_ALREADY_REFUNDED" in error_message:
-            error_text = (
-                f"⚠️ **تم إرجاع النجوم لهذه المعاملة مسبقًا!**\n\n"
-                f"🆔 رقم المعاملة: `{charge_id}`"
-            )
-        elif "CHARGE_NOT_FOUND" in error_message or "not found" in error_message.lower():
-            error_text = (
-                f"❌ **رقم المعاملة غير صحيح!**\n\n"
-                f"الأسباب المحتملة:\n"
-                f"• رقم المعاملة خاطئ\n"
-                f"• المعاملة قديمة (أكثر من 180 يوم)\n"
-                f"• المعاملة لم تكتمل\n\n"
-                f"🆔 الرقم المستخدم:\n`{charge_id}`"
-            )
-        elif "PAYMENT_EXPIRED" in error_message:
-            error_text = (
-                f"⏰ **انتهت صلاحية المعاملة!**\n\n"
-                f"لا يمكن إرجاع النجوم لمعاملات أقدم من 180 يومًا."
-            )
-        else:
-            error_text = (
-                f"❌ **فشل إرجاع النجوم!**\n\n"
-                f"**الخطأ:** `{error_message}`\n\n"
-                f"👤 User ID: `{target_user_id}`\n"
-                f"🆔 Charge ID: `{charge_id}`"
-            )
+        # نشر المسابقة
+        await lucky_wheel.publish_contest(
+            context,
+            contest_id,
+            state_info['channel_id'],
+            state_info['max_participants'],
+            state_info.get('custom_message')
+        )
         
-        logger.error(f"فشل الاسترداد: {error_message}")
-        await loading_msg.edit_text(error_text, parse_mode='Markdown')
+        await update.message.reply_text(
+            "✅ تم إنشاء مسابقة عجلة الحظ بنجاح!\n"
+            "تم نشر المسابقة في القناة."
+        )
+        
+        del user_states[user_id]
+        return
+    
+    # ══════ مسابقة الإحالات ══════
+    if state == 'waiting_referral_channel':
+        if not text.startswith('@'):
+            await update.message.reply_text("❌ يجب أن يبدأ المعرف بـ @")
+            return
+        
+        state_info['channel_id'] = text
+        state_info['state'] = 'waiting_referral_message'
+        
+        await update.message.reply_text(
+            "📝 أرسل رسالة المسابقة التي ستُنشر في القناة:\n\n"
+            "يمكنك استخدام Markdown للتنسيق."
+        )
+        return
+    
+    if state == 'waiting_referral_message':
+        # إنشاء المسابقة
+        contest_id = await referral_contest.create(
+            user_id, state_info['channel_id'], text
+        )
+        
+        # نشر المسابقة
+        await referral_contest.publish_contest(
+            context, contest_id, state_info['channel_id'], text
+        )
+        
+        await update.message.reply_text(
+            "✅ تم إنشاء مسابقة الإحالات بنجاح!\n"
+            "تم نشر المسابقة في القناة."
+        )
+        
+        del user_states[user_id]
+        return
 
-# تشغيل البوت
+# ═══════════════════════════════════════════════════════════════
+# ⏰ المهام الدورية
+# ═══════════════════════════════════════════════════════════════
+
+async def periodic_subscription_check(context: ContextTypes.DEFAULT_TYPE):
+    """التحقق الدوري من الاشتراكات"""
+    logger.info("Running periodic subscription check...")
+    
+    # التحقق من اشتراكات التصويت
+    await voting_contest.check_subscriptions_task(context)
+    
+    # التحقق من اشتراكات الإحالات
+    await referral_contest.check_subscriptions_task(context)
+    
+    logger.info("Subscription check completed.")
+
+# ═══════════════════════════════════════════════════════════════
+# 🚀 نقطة البداية
+# ═══════════════════════════════════════════════════════════════
+
+async def post_init(application: Application):
+    """إعدادات ما بعد التهيئة"""
+    await db.init_db()
+    logger.info("Database initialized successfully!")
+    
+    # جدولة المهمة الدورية (كل 3 ساعات)
+    job_queue = application.job_queue
+    job_queue.run_repeating(
+        periodic_subscription_check,
+        interval=CHECK_SUBSCRIPTION_INTERVAL * 3600,
+        first=10
+    )
+
 def main():
-    init_db()
+    """الدالة الرئيسية"""
+    # التحقق من التوكن
+    if TELEGRAM_BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
+        print("❌ يرجى وضع توكن البوت في TELEGRAM_BOT_TOKEN")
+        return
     
-    application = Application.builder().token(TOKEN).build()
+    if OFFICIAL_CHANNEL == "@YourOfficialChannel":
+        print("⚠️ يرجى وضع معرف قناتك الرسمية في OFFICIAL_CHANNEL")
     
+    # إنشاء التطبيق
+    application = (
+        Application.builder()
+        .token(TELEGRAM_BOT_TOKEN)
+        .post_init(post_init)
+        .build()
+    )
+    
+    # إضافة المعالجات
     application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("admin", admin))
-    application.add_handler(CommandHandler("refund", refund_stars))
-    
+    application.add_handler(CommandHandler("done", done_command))
+    application.add_handler(CommandHandler("cancel", cancel_command))
+    application.add_handler(CommandHandler("skip", skip_command))
     application.add_handler(CallbackQueryHandler(button_handler))
+    application.add_handler(
+        MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler)
+    )
     
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
+    # بدء البوت
+    logger.info("🚀 Starting bot...")
+    print("✅ البوت يعمل الآن!")
+    print(f"📢 القناة الرسمية: {OFFICIAL_CHANNEL}")
+    print(f"⏰ فترة التحقق: {CHECK_SUBSCRIPTION_INTERVAL} ساعات")
     
-    application.add_handler(MessageHandler((filters.PHOTO | filters.Document.ALL) & ~filters.COMMAND, message_handler))
-    
-    application.add_handler(PreCheckoutQueryHandler(precheckout_callback))
-    application.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment))
-    
-    print("🤖 البوت يعمل الآن...")
-    print(f"✅ ID المشرف: {ADMIN_ID}")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == '__main__':
