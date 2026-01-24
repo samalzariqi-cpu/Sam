@@ -1,2118 +1,256 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-🎯 بوت مسابقات تلجرام المتقدم - ملف واحد شامل
-يحتوي على 3 أنواع مسابقات:
-1. مسابقة التصويت (Voting Contest)
-2. عجلة الحظ (Lucky Wheel)
-3. مسابقة الإحالات (Referral Contest)
-
-المتطلبات:
-pip install python-telegram-bot==20.7 aiosqlite
-
-طريقة التشغيل:
-1. ضع التوكن الخاص بك في TELEGRAM_BOT_TOKEN
-2. ضع معرف قناتك الرسمية في OFFICIAL_CHANNEL
-3. شغل البوت: python config.py
+ملف مدمج - 2 بوت
+تم الدمج تلقائياً من جميع ملفات .py
+مع Flask - للاستضافات التي تسمح بـ Webserver
 """
+import os, sys, threading, time, base64
+import types
+from flask import Flask, jsonify
+from datetime import datetime
 
-import asyncio
-import logging
-import random
-import time
-from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Set, Tuple
-import json
-import aiosqlite
-from telegram import (
-    Update, InlineKeyboardButton, InlineKeyboardMarkup,
-    ChatMember
-)
-from telegram.ext import (
-    Application, CommandHandler, CallbackQueryHandler,
-    ContextTypes, MessageHandler, filters
-)
-from telegram.error import TelegramError
+# Flask Application
+app = Flask(__name__)
 
-# التوافق مع الإصدارات المختلفة
-try:
-    from telegram.constants import ParseMode
-except ImportError:
-    # للإصدارات القديمة
-    class ParseMode:
-        MARKDOWN = "Markdown"
-        MARKDOWN_V2 = "MarkdownV2"
-        HTML = "HTML"
+# متغير لحفظ حالة البوتات
+bots_status = {}
+start_time = None
 
-# التوافق مع ChatMemberStatus
-try:
-    from telegram import ChatMemberStatus
-except ImportError:
-    # للإصدارات القديمة
-    class ChatMemberStatus:
-        MEMBER = "member"
-        ADMINISTRATOR = "administrator"
-        OWNER = "creator"
-        LEFT = "left"
-        KICKED = "kicked"
-
-# ═══════════════════════════════════════════════════════════════
-# ⚙️ الإعدادات الأساسية
-# ═══════════════════════════════════════════════════════════════
-
-# ضع توكن البوت هنا
-TELEGRAM_BOT_TOKEN = "8415034792:AAHuEHGs3CaNMq3KtUWNEKmqTljJ3jFc_mM"
-
-# معرف قناتك الرسمية (بدون @)
-OFFICIAL_CHANNEL = "@WhatIOwnQBot1"
-
-# اسم قاعدة البيانات
-DATABASE_NAME = "contests.db"
-
-# فترة التحقق من الاشتراك (بالساعات)
-CHECK_SUBSCRIPTION_INTERVAL = 3
-
-# تفعيل السجلات
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
-logger = logging.getLogger(__name__)
-
-# ═══════════════════════════════════════════════════════════════
-# 🗄️ قاعدة البيانات
-# ═══════════════════════════════════════════════════════════════
-
-class Database:
-    """إدارة قاعدة البيانات SQLite"""
+@app.route("/")
+def home():
+    """الصفحة الرئيسية - تعرض حالة البوتات"""
+    uptime = ""
+    if start_time:
+        delta = datetime.now() - start_time
+        hours = delta.seconds // 3600
+        minutes = (delta.seconds % 3600) // 60
+        uptime = f"{delta.days}d {hours}h {minutes}m"
     
-    def __init__(self, db_name: str):
-        self.db_name = db_name
+    html = f"""
+    <!DOCTYPE html>
+    <html dir="rtl" lang="ar">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>🤖 حالة البوتات - 2 بوت</title>
+        <style>
+            * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+            body {{
+                font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                min-height: 100vh;
+                padding: 20px;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+            }}
+            .container {{
+                background: white;
+                border-radius: 20px;
+                box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+                padding: 40px;
+                max-width: 800px;
+                width: 100%;
+            }}
+            h1 {{
+                color: #667eea;
+                text-align: center;
+                margin-bottom: 10px;
+                font-size: 2.5em;
+            }}
+            .uptime {{
+                text-align: center;
+                color: #666;
+                margin-bottom: 30px;
+                font-size: 1.1em;
+            }}
+            .status {{
+                background: #f0f9ff;
+                border-radius: 15px;
+                padding: 25px;
+                margin-bottom: 20px;
+                border-right: 5px solid #10b981;
+            }}
+            .status h2 {{
+                color: #10b981;
+                margin-bottom: 15px;
+                font-size: 1.5em;
+            }}
+            .bot-item {{
+                background: white;
+                padding: 15px;
+                margin: 10px 0;
+                border-radius: 10px;
+                display: flex;
+                align-items: center;
+                box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+            }}
+            .bot-icon {{
+                font-size: 2em;
+                margin-left: 15px;
+            }}
+            .bot-info {{
+                flex: 1;
+            }}
+            .bot-name {{
+                font-weight: bold;
+                color: #333;
+                font-size: 1.1em;
+            }}
+            .bot-status {{
+                color: #10b981;
+                font-size: 0.9em;
+                margin-top: 5px;
+            }}
+            .footer {{
+                text-align: center;
+                margin-top: 30px;
+                color: #666;
+                font-size: 0.9em;
+            }}
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>🤖 نظام إدارة البوتات</h1>
+            <div class="uptime">⏱️ وقت التشغيل: {uptime}</div>
+            
+            <div class="status">
+                <h2>✅ جميع البوتات تعمل (2 بوت)</h2>
+                <div class="bot-item">
+                    <div class="bot-icon">🤖</div>
+                    <div class="bot-info">
+                        <div class="bot-name">1.py</div>
+                        <div class="bot-status">✓ يعمل بشكل طبيعي</div>
+                    </div>
+                </div>
+                <div class="bot-item">
+                    <div class="bot-icon">🤖</div>
+                    <div class="bot-info">
+                        <div class="bot-name">2.py</div>
+                        <div class="bot-status">✓ يعمل بشكل طبيعي</div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="footer">
+                Made with ❤️ | Powered by Flask + Telegram Bot
+            </div>
+        </div>
+    </body>
+    </html>
+    """
+    return html
+
+@app.route("/status")
+def status():
+    """API endpoint - يعرض حالة البوتات بصيغة JSON"""
+    return jsonify({
+        "total_bots": 2,
+        "status": "running",
+        "bots": bots_status,
+        "uptime": str(datetime.now() - start_time) if start_time else "0"
+    })
+
+@app.route("/health")
+def health():
+    """Health check endpoint"""
+    return jsonify({"status": "healthy"}), 200
+
+def run_flask():
+    """تشغيل Flask server"""
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
+
+# أكواد البوتات
+BOTS_CODE = {
+    1: "aW1wb3J0IGxvZ2dpbmcKZnJvbSB0ZWxlZ3JhbSBpbXBvcnQgVXBkYXRlLCBJbmxpbmVLZXlib2FyZEJ1dHRvbiwgSW5saW5lS2V5Ym9hcmRNYXJrdXAsIExhYmVsZWRQcmljZQpmcm9tIHRlbGVncmFtLmV4dCBpbXBvcnQgQXBwbGljYXRpb24sIENvbW1hbmRIYW5kbGVyLCBDYWxsYmFja1F1ZXJ5SGFuZGxlciwgTWVzc2FnZUhhbmRsZXIsIGZpbHRlcnMsIENvbnRleHRUeXBlcywgUHJlQ2hlY2tvdXRRdWVyeUhhbmRsZXIsIENvbnZlcnNhdGlvbkhhbmRsZXIKZnJvbSBkYXRldGltZSBpbXBvcnQgZGF0ZXRpbWUsIHRpbWVkZWx0YQppbXBvcnQgc3FsaXRlMwppbXBvcnQgcmFuZG9tCmltcG9ydCByZQoKIyDYpdi52K/Yp9ivINin2YTYqtiz2KzZitmECmxvZ2dpbmcuYmFzaWNDb25maWcoZm9ybWF0PSclKGFzY3RpbWUpcyAtICUobmFtZSlzIC0gJShsZXZlbG5hbWUpcyAtICUobWVzc2FnZSlzJywgbGV2ZWw9bG9nZ2luZy5JTkZPKQpsb2dnZXIgPSBsb2dnaW5nLmdldExvZ2dlcihfX25hbWVfXykKCiMg2YXYudmE2YjZhdin2Kog2KfZhNio2YjYqgpUT0tFTiA9ICc3NjA2NDMyNDI4OkFBRnZ2dFU2V2ptYUJ5YXRlWEtiM1FRei12Rllic1haNGxFJwpBRE1JTl9JRCA9IDEwNTg2MTYzMTYKCiMg2K3Yp9mE2KfYqiDYp9mE2YXYrdin2K/Yq9ipCldBSVRJTkdfVFJBTlNGRVJfQU1PVU5ULCBXQUlUSU5HX1RSQU5TRkVSX0lELCBXQUlUSU5HX1BST0RVQ1RfTkFNRSwgV0FJVElOR19QUk9EVUNUX1BSSUNFLCBXQUlUSU5HX1BST0RVQ1RfQ09OVEVOVCwgV0FJVElOR19CUk9BRENBU1QsIFdBSVRJTkdfQ0hBTk5FTCwgV0FJVElOR19HSUZUX0NPREVfUE9JTlRTLCBXQUlUSU5HX0dJRlRfQ09ERV9VU0VTLCBXQUlUSU5HX1NUQVJTX0FNT1VOVCA9IHJhbmdlKDEwKQoKIyDYpdi52K/Yp9ivINmC2KfYudiv2Kkg2KfZhNio2YrYp9mG2KfYqgpkZWYgaW5pdF9kYigpOgogICAgY29ubiA9IHNxbGl0ZTMuY29ubmVjdCgncG9pbnRzX2JvdC5kYicpCiAgICBjID0gY29ubi5jdXJzb3IoKQogICAgCiAgICAjINis2K/ZiNmEINin2YTZhdiz2KrYrtiv2YXZitmGCiAgICBjLmV4ZWN1dGUoJycnQ1JFQVRFIFRBQkxFIElGIE5PVCBFWElTVFMgdXNlcnMKICAgICAgICAgICAgICAgICAodXNlcl9pZCBJTlRFR0VSIFBSSU1BUlkgS0VZLCB1c2VybmFtZSBURVhULCBwb2ludHMgSU5URUdFUiBERUZBVUxUIDAsIAogICAgICAgICAgICAgICAgICByZWZlcnJlcl9pZCBJTlRFR0VSLCBqb2luX2RhdGUgVEVYVCwgbGFzdF9naWZ0X2RhdGUgVEVYVCknJycpCiAgICAKICAgICMg2KzYr9mI2YQg2KfZhNmF2YbYqtis2KfYqgogICAgYy5leGVjdXRlKCcnJ0NSRUFURSBUQUJMRSBJRiBOT1QgRVhJU1RTIHByb2R1Y3RzCiAgICAgICAgICAgICAgICAgKGlkIElOVEVHRVIgUFJJTUFSWSBLRVkgQVVUT0lOQ1JFTUVOVCwgbmFtZSBURVhULCBwcmljZSBJTlRFR0VSLCAKICAgICAgICAgICAgICAgICAgY29udGVudF90eXBlIFRFWFQsIGNvbnRlbnQgVEVYVCknJycpCiAgICAKICAgICMg2KzYr9mI2YQg2KfZhNil2LnYr9in2K/Yp9iqCiAgICBjLmV4ZWN1dGUoJycnQ1JFQVRFIFRBQkxFIElGIE5PVCBFWElTVFMgc2V0dGluZ3MKICAgICAgICAgICAgICAgICAoa2V5IFRFWFQgUFJJTUFSWSBLRVksIHZhbHVlIFRFWFQpJycnKQogICAgCiAgICAjINis2K/ZiNmEINin2YTZgtmG2YjYp9iqINin2YTYpdis2KjYp9ix2YrYqQogICAgYy5leGVjdXRlKCcnJ0NSRUFURSBUQUJMRSBJRiBOT1QgRVhJU1RTIGNoYW5uZWxzCiAgICAgICAgICAgICAgICAgKGNoYW5uZWxfaWQgVEVYVCBQUklNQVJZIEtFWSwgY2hhbm5lbF91c2VybmFtZSBURVhUKScnJykKICAgIAogICAgIyDYrNiv2YjZhCDYo9mD2YjYp9ivINin2YTZh9iv2KfZitinCiAgICBjLmV4ZWN1dGUoJycnQ1JFQVRFIFRBQkxFIElGIE5PVCBFWElTVFMgZ2lmdF9jb2RlcwogICAgICAgICAgICAgICAgIChjb2RlIFRFWFQgUFJJTUFSWSBLRVksIHBvaW50cyBJTlRFR0VSLCBtYXhfdXNlcyBJTlRFR0VSLCAKICAgICAgICAgICAgICAgICAgdXNlZF9jb3VudCBJTlRFR0VSIERFRkFVTFQgMCknJycpCiAgICAKICAgICMg2KzYr9mI2YQg2KfYs9iq2K7Yr9in2YXYp9iqINin2YTYo9mD2YjYp9ivCiAgICBjLmV4ZWN1dGUoJycnQ1JFQVRFIFRBQkxFIElGIE5PVCBFWElTVFMgY29kZV91c2VycwogICAgICAgICAgICAgICAgIChjb2RlIFRFWFQsIHVzZXJfaWQgSU5URUdFUiwgUFJJTUFSWSBLRVkgKGNvZGUsIHVzZXJfaWQpKScnJykKICAgIAogICAgIyDYrNiv2YjZhCDYs9is2YQg2KfZhNmF2LnYp9mF2YTYp9iqCiAgICBjLmV4ZWN1dGUoJycnQ1JFQVRFIFRBQkxFIElGIE5PVCBFWElTVFMgdHJhbnNhY3Rpb25zCiAgICAgICAgICAgICAgICAgKGlkIElOVEVHRVIgUFJJTUFSWSBLRVkgQVVUT0lOQ1JFTUVOVCwgdXNlcl9pZCBJTlRFR0VSLCAKICAgICAgICAgICAgICAgICAgdHlwZSBURVhULCBhbW91bnQgSU5URUdFUiwgZGVzY3JpcHRpb24gVEVYVCwgZGF0ZSBURVhUKScnJykKICAgIAogICAgIyDYrNiv2YjZhCDYt9mE2KjYp9iqINin2YTYp9iz2KrYsdiv2KfYrwogICAgYy5leGVjdXRlKCcnJ0NSRUFURSBUQUJMRSBJRiBOT1QgRVhJU1RTIHJlZnVuZF9yZXF1ZXN0cwogICAgICAgICAgICAgICAgIChpZCBJTlRFR0VSIFBSSU1BUlkgS0VZIEFVVE9JTkNSRU1FTlQsIAogICAgICAgICAgICAgICAgICB1c2VyX2lkIElOVEVHRVIsIAogICAgICAgICAgICAgICAgICBjaGFyZ2VfaWQgVEVYVCwgCiAgICAgICAgICAgICAgICAgIGNyZWF0ZWRfYXQgVEVYVCknJycpCiAgICAKICAgICMg2KfZhNil2LnYr9in2K/Yp9iqINin2YTYp9mB2KrYsdin2LbZitipCiAgICBkZWZhdWx0X3NldHRpbmdzID0gewogICAgICAgICd3ZWxjb21lX21lc3NhZ2UnOiAn8J+RiyDZhdix2K3YqNin2Ysg2KjZgyDZgdmKINio2YjYqiDYqtis2YXZiti5INin2YTZhtmC2KfYtyFcblxu8J+SjiDYp9is2YXYuSDYp9mE2YbZgtin2Lcg2YjYp9iz2KrYqNiv2YTZh9inINio2YXZhtiq2KzYp9iqINix2KfYpti52KknLAogICAgICAgICdyZWZlcnJhbF9wb2ludHMnOiAnMScsCiAgICAgICAgJ3RyYW5zZmVyX2ZlZSc6ICcxMCcsCiAgICAgICAgJ2RhaWx5X2dpZnRfcG9pbnRzJzogJzEnLAogICAgICAgICdkYWlseV9naWZ0X21vZGUnOiAnZml4ZWQnLAogICAgICAgICdkYWlseV9naWZ0X21pbic6ICcwJywKICAgICAgICAnZGFpbHlfZ2lmdF9tYXgnOiAnMTAwJywKICAgICAgICAnc3RhcnNfcmF0aW8nOiAnMycsCiAgICAgICAgJ2JvdF9zdGF0dXMnOiAnYWN0aXZlJwogICAgfQogICAgCiAgICBmb3Iga2V5LCB2YWx1ZSBpbiBkZWZhdWx0X3NldHRpbmdzLml0ZW1zKCk6CiAgICAgICAgYy5leGVjdXRlKCdJTlNFUlQgT1IgSUdOT1JFIElOVE8gc2V0dGluZ3MgKGtleSwgdmFsdWUpIFZBTFVFUyAoPywgPyknLCAoa2V5LCB2YWx1ZSkpCiAgICAKICAgIGNvbm4uY29tbWl0KCkKICAgIGNvbm4uY2xvc2UoKQoKIyDYr9mI2KfZhCDZgtin2LnYr9ipINin2YTYqNmK2KfZhtin2KoKZGVmIGdldF9zZXR0aW5nKGtleSk6CiAgICBjb25uID0gc3FsaXRlMy5jb25uZWN0KCdwb2ludHNfYm90LmRiJykKICAgIGMgPSBjb25uLmN1cnNvcigpCiAgICBjLmV4ZWN1dGUoJ1NFTEVDVCB2YWx1ZSBGUk9NIHNldHRpbmdzIFdIRVJFIGtleSA9ID8nLCAoa2V5LCkpCiAgICByZXN1bHQgPSBjLmZldGNob25lKCkKICAgIGNvbm4uY2xvc2UoKQogICAgcmV0dXJuIHJlc3VsdFswXSBpZiByZXN1bHQgZWxzZSBOb25lCgpkZWYgc2V0X3NldHRpbmcoa2V5LCB2YWx1ZSk6CiAgICBjb25uID0gc3FsaXRlMy5jb25uZWN0KCdwb2ludHNfYm90LmRiJykKICAgIGMgPSBjb25uLmN1cnNvcigpCiAgICBjLmV4ZWN1dGUoJ0lOU0VSVCBPUiBSRVBMQUNFIElOVE8gc2V0dGluZ3MgKGtleSwgdmFsdWUpIFZBTFVFUyAoPywgPyknLCAoa2V5LCB2YWx1ZSkpCiAgICBjb25uLmNvbW1pdCgpCiAgICBjb25uLmNsb3NlKCkKCmRlZiBnZXRfdXNlcih1c2VyX2lkKToKICAgIGNvbm4gPSBzcWxpdGUzLmNvbm5lY3QoJ3BvaW50c19ib3QuZGInKQogICAgYyA9IGNvbm4uY3Vyc29yKCkKICAgIGMuZXhlY3V0ZSgnU0VMRUNUICogRlJPTSB1c2VycyBXSEVSRSB1c2VyX2lkID0gPycsICh1c2VyX2lkLCkpCiAgICB1c2VyID0gYy5mZXRjaG9uZSgpCiAgICBjb25uLmNsb3NlKCkKICAgIHJldHVybiB1c2VyCgpkZWYgYWRkX3VzZXIodXNlcl9pZCwgdXNlcm5hbWUsIHJlZmVycmVyX2lkPU5vbmUpOgogICAgY29ubiA9IHNxbGl0ZTMuY29ubmVjdCgncG9pbnRzX2JvdC5kYicpCiAgICBjID0gY29ubi5jdXJzb3IoKQogICAgam9pbl9kYXRlID0gZGF0ZXRpbWUubm93KCkuc3RyZnRpbWUoJyVZLSVtLSVkICVIOiVNOiVTJykKICAgIGMuZXhlY3V0ZSgnSU5TRVJUIE9SIElHTk9SRSBJTlRPIHVzZXJzICh1c2VyX2lkLCB1c2VybmFtZSwgcmVmZXJyZXJfaWQsIGpvaW5fZGF0ZSkgVkFMVUVTICg/LCA/LCA/LCA/KScsCiAgICAgICAgICAgICAgKHVzZXJfaWQsIHVzZXJuYW1lLCByZWZlcnJlcl9pZCwgam9pbl9kYXRlKSkKICAgIGNvbm4uY29tbWl0KCkKICAgIGNvbm4uY2xvc2UoKQoKZGVmIHVwZGF0ZV9wb2ludHModXNlcl9pZCwgcG9pbnRzKToKICAgIGNvbm4gPSBzcWxpdGUzLmNvbm5lY3QoJ3BvaW50c19ib3QuZGInKQogICAgYyA9IGNvbm4uY3Vyc29yKCkKICAgIGMuZXhlY3V0ZSgnVVBEQVRFIHVzZXJzIFNFVCBwb2ludHMgPSBwb2ludHMgKyA/IFdIRVJFIHVzZXJfaWQgPSA/JywgKHBvaW50cywgdXNlcl9pZCkpCiAgICBjb25uLmNvbW1pdCgpCiAgICBjb25uLmNsb3NlKCkKCmRlZiBhZGRfdHJhbnNhY3Rpb24odXNlcl9pZCwgdHJhbnNfdHlwZSwgYW1vdW50LCBkZXNjcmlwdGlvbik6CiAgICBjb25uID0gc3FsaXRlMy5jb25uZWN0KCdwb2ludHNfYm90LmRiJykKICAgIGMgPSBjb25uLmN1cnNvcigpCiAgICBkYXRlID0gZGF0ZXRpbWUubm93KCkuc3RyZnRpbWUoJyVZLSVtLSVkICVIOiVNOiVTJykKICAgIGMuZXhlY3V0ZSgnSU5TRVJUIElOVE8gdHJhbnNhY3Rpb25zICh1c2VyX2lkLCB0eXBlLCBhbW91bnQsIGRlc2NyaXB0aW9uLCBkYXRlKSBWQUxVRVMgKD8sID8sID8sID8sID8pJywKICAgICAgICAgICAgICAodXNlcl9pZCwgdHJhbnNfdHlwZSwgYW1vdW50LCBkZXNjcmlwdGlvbiwgZGF0ZSkpCiAgICBjb25uLmNvbW1pdCgpCiAgICBjb25uLmNsb3NlKCkKCmRlZiBnZXRfcHJvZHVjdHMoKToKICAgIGNvbm4gPSBzcWxpdGUzLmNvbm5lY3QoJ3BvaW50c19ib3QuZGInKQogICAgYyA9IGNvbm4uY3Vyc29yKCkKICAgIGMuZXhlY3V0ZSgnU0VMRUNUICogRlJPTSBwcm9kdWN0cyBPUkRFUiBCWSBwcmljZScpCiAgICBwcm9kdWN0cyA9IGMuZmV0Y2hhbGwoKQogICAgY29ubi5jbG9zZSgpCiAgICByZXR1cm4gcHJvZHVjdHMKCmRlZiBhZGRfcHJvZHVjdChuYW1lLCBwcmljZSwgY29udGVudF90eXBlLCBjb250ZW50KToKICAgIGNvbm4gPSBzcWxpdGUzLmNvbm5lY3QoJ3BvaW50c19ib3QuZGInKQogICAgYyA9IGNvbm4uY3Vyc29yKCkKICAgIGMuZXhlY3V0ZSgnSU5TRVJUIElOVE8gcHJvZHVjdHMgKG5hbWUsIHByaWNlLCBjb250ZW50X3R5cGUsIGNvbnRlbnQpIFZBTFVFUyAoPywgPywgPywgPyknLAogICAgICAgICAgICAgIChuYW1lLCBwcmljZSwgY29udGVudF90eXBlLCBjb250ZW50KSkKICAgIGNvbm4uY29tbWl0KCkKICAgIGNvbm4uY2xvc2UoKQoKZGVmIGRlbGV0ZV9wcm9kdWN0KHByb2R1Y3RfaWQpOgogICAgY29ubiA9IHNxbGl0ZTMuY29ubmVjdCgncG9pbnRzX2JvdC5kYicpCiAgICBjID0gY29ubi5jdXJzb3IoKQogICAgYy5leGVjdXRlKCdERUxFVEUgRlJPTSBwcm9kdWN0cyBXSEVSRSBpZCA9ID8nLCAocHJvZHVjdF9pZCwpKQogICAgY29ubi5jb21taXQoKQogICAgY29ubi5jbG9zZSgpCgpkZWYgZ2V0X2NoYW5uZWxzKCk6CiAgICBjb25uID0gc3FsaXRlMy5jb25uZWN0KCdwb2ludHNfYm90LmRiJykKICAgIGMgPSBjb25uLmN1cnNvcigpCiAgICBjLmV4ZWN1dGUoJ1NFTEVDVCAqIEZST00gY2hhbm5lbHMnKQogICAgY2hhbm5lbHMgPSBjLmZldGNoYWxsKCkKICAgIGNvbm4uY2xvc2UoKQogICAgcmV0dXJuIGNoYW5uZWxzCgpkZWYgYWRkX2NoYW5uZWwoY2hhbm5lbF9pZCwgY2hhbm5lbF91c2VybmFtZSk6CiAgICBjb25uID0gc3FsaXRlMy5jb25uZWN0KCdwb2ludHNfYm90LmRiJykKICAgIGMgPSBjb25uLmN1cnNvcigpCiAgICBjLmV4ZWN1dGUoJ0lOU0VSVCBPUiBSRVBMQUNFIElOVE8gY2hhbm5lbHMgKGNoYW5uZWxfaWQsIGNoYW5uZWxfdXNlcm5hbWUpIFZBTFVFUyAoPywgPyknLAogICAgICAgICAgICAgIChjaGFubmVsX2lkLCBjaGFubmVsX3VzZXJuYW1lKSkKICAgIGNvbm4uY29tbWl0KCkKICAgIGNvbm4uY2xvc2UoKQoKZGVmIHJlbW92ZV9jaGFubmVsKGNoYW5uZWxfaWQpOgogICAgY29ubiA9IHNxbGl0ZTMuY29ubmVjdCgncG9pbnRzX2JvdC5kYicpCiAgICBjID0gY29ubi5jdXJzb3IoKQogICAgYy5leGVjdXRlKCdERUxFVEUgRlJPTSBjaGFubmVscyBXSEVSRSBjaGFubmVsX2lkID0gPycsIChjaGFubmVsX2lkLCkpCiAgICBjb25uLmNvbW1pdCgpCiAgICBjb25uLmNsb3NlKCkKCiMg2K/Yp9mE2Kkg2KfZhNiq2K3ZgtmCINmF2YYg2KfZhNin2LTYqtix2KfZgwphc3luYyBkZWYgY2hlY2tfc3Vic2NyaXB0aW9uKHVzZXJfaWQsIGNvbnRleHQpOgogICAgY2hhbm5lbHMgPSBnZXRfY2hhbm5lbHMoKQogICAgaWYgbm90IGNoYW5uZWxzOgogICAgICAgIHJldHVybiBUcnVlCiAgICAKICAgIGZvciBjaGFubmVsIGluIGNoYW5uZWxzOgogICAgICAgIHRyeToKICAgICAgICAgICAgbWVtYmVyID0gYXdhaXQgY29udGV4dC5ib3QuZ2V0X2NoYXRfbWVtYmVyKGNoYW5uZWxbMF0sIHVzZXJfaWQpCiAgICAgICAgICAgIGlmIG1lbWJlci5zdGF0dXMgaW4gWydsZWZ0JywgJ2tpY2tlZCddOgogICAgICAgICAgICAgICAgcmV0dXJuIEZhbHNlCiAgICAgICAgZXhjZXB0OgogICAgICAgICAgICBwYXNzCiAgICByZXR1cm4gVHJ1ZQoKIyDYr9in2YTYqSDYrdiz2KfYqCDYp9mE2YfYr9mK2Kkg2KfZhNmK2YjZhdmK2KkKZGVmIGNhbGN1bGF0ZV9kYWlseV9naWZ0KCk6CiAgICBtb2RlID0gZ2V0X3NldHRpbmcoJ2RhaWx5X2dpZnRfbW9kZScpCiAgICBpZiBtb2RlID09ICdmaXhlZCc6CiAgICAgICAgcmV0dXJuIGludChnZXRfc2V0dGluZygnZGFpbHlfZ2lmdF9wb2ludHMnKSkKICAgIGVsc2U6CiAgICAgICAgbWluX3BvaW50cyA9IGludChnZXRfc2V0dGluZygnZGFpbHlfZ2lmdF9taW4nKSkKICAgICAgICBtYXhfcG9pbnRzID0gaW50KGdldF9zZXR0aW5nKCdkYWlseV9naWZ0X21heCcpKQogICAgICAgIAogICAgICAgICMg2YbYuNin2YUg2KfZhNit2LgKICAgICAgICByYW5kID0gcmFuZG9tLnJhbmRvbSgpCiAgICAgICAgaWYgcmFuZCA8IDAuODA6CiAgICAgICAgICAgIHJldHVybiByYW5kb20ucmFuZGludChtaW4obWluX3BvaW50cywgMTApLCBtaW4oMTAsIG1heF9wb2ludHMpKQogICAgICAgIGVsaWYgcmFuZCA8IDAuOTU6CiAgICAgICAgICAgIHJldHVybiByYW5kb20ucmFuZGludChtYXgobWluX3BvaW50cywgMTEpLCBtaW4oMjAsIG1heF9wb2ludHMpKQogICAgICAgIGVsaWYgcmFuZCA8IDAuOTg6CiAgICAgICAgICAgIHJldHVybiByYW5kb20ucmFuZGludChtYXgobWluX3BvaW50cywgMjEpLCBtaW4oMzAsIG1heF9wb2ludHMpKQogICAgICAgIGVsc2U6CiAgICAgICAgICAgIHJldHVybiByYW5kb20ucmFuZGludChtYXgobWluX3BvaW50cywgMzEpLCBtYXhfcG9pbnRzKQoKIyDYp9mE2KPYstix2KfYsSDYp9mE2LHYptmK2LPZitipCmRlZiBtYWluX2tleWJvYXJkKHVzZXJfaWQ9Tm9uZSk6CiAgICBrZXlib2FyZCA9IFsKICAgICAgICBbSW5saW5lS2V5Ym9hcmRCdXR0b24oIvCflKUg2KfZhNmF2KrYrNixIC0g2KfZhNi52LHZiNi2IPCflKUiLCBjYWxsYmFja19kYXRhPSdzaG9wJyldLAogICAgICAgIFtJbmxpbmVLZXlib2FyZEJ1dHRvbigi8J+SsCDYsdi12YrYr9mKIiwgY2FsbGJhY2tfZGF0YT0nbXlfcG9pbnRzJyksCiAgICAgICAgIElubGluZUtleWJvYXJkQnV0dG9uKCLwn46BINmH2K/ZitipINmK2YjZhdmK2KkiLCBjYWxsYmFja19kYXRhPSdkYWlseV9naWZ0JyldLAogICAgICAgIFtJbmxpbmVLZXlib2FyZEJ1dHRvbigi8J+SuCDYqtit2YjZitmEINmG2YLYp9i3IiwgY2FsbGJhY2tfZGF0YT0ndHJhbnNmZXInKSwKICAgICAgICAgSW5saW5lS2V5Ym9hcmRCdXR0b24oIuKtkCDYtNix2KfYoSDZhtmC2KfYtyIsIGNhbGxiYWNrX2RhdGE9J2J1eV9zdGFycycpXSwKICAgICAgICBbSW5saW5lS2V5Ym9hcmRCdXR0b24oIvCfkaUg2K/YudmI2Kkg2KPYtdiv2YLYp9ihIiwgY2FsbGJhY2tfZGF0YT0ncmVmZXJyYWwnKSwKICAgICAgICAgSW5saW5lS2V5Ym9hcmRCdXR0b24oIvCfk4og2LPYrNmEINin2YTZhdi52KfZhdmE2KfYqiIsIGNhbGxiYWNrX2RhdGE9J3RyYW5zYWN0aW9ucycpXQogICAgXQogICAgCiAgICBpZiB1c2VyX2lkID09IEFETUlOX0lEOgogICAgICAgIGtleWJvYXJkLmFwcGVuZChbSW5saW5lS2V5Ym9hcmRCdXR0b24oIvCfjpvvuI8g2YTZiNit2Kkg2KfZhNiq2K3Zg9mFIiwgY2FsbGJhY2tfZGF0YT0nYWRtaW5fcGFuZWwnKV0pCiAgICAKICAgIHJldHVybiBJbmxpbmVLZXlib2FyZE1hcmt1cChrZXlib2FyZCkKCmRlZiBhZG1pbl9rZXlib2FyZCgpOgogICAga2V5Ym9hcmQgPSBbCiAgICAgICAgW0lubGluZUtleWJvYXJkQnV0dG9uKCLwn5OKINin2YTYpdit2LXYp9im2YrYp9iqIiwgY2FsbGJhY2tfZGF0YT0nYWRtaW5fc3RhdHMnKV0sCiAgICAgICAgW0lubGluZUtleWJvYXJkQnV0dG9uKCLimpnvuI8g2KfZhNil2LnYr9in2K/Yp9iqIiwgY2FsbGJhY2tfZGF0YT0nYWRtaW5fc2V0dGluZ3MnKV0sCiAgICAgICAgW0lubGluZUtleWJvYXJkQnV0dG9uKCLinpUg2KXYttin2YHYqSDZhdmG2KrYrCIsIGNhbGxiYWNrX2RhdGE9J2FkZF9wcm9kdWN0JyldLAogICAgICAgIFtJbmxpbmVLZXlib2FyZEJ1dHRvbigi8J+Xke+4jyDYrdiw2YEg2YXZhtiq2KwiLCBjYWxsYmFja19kYXRhPSdkZWxldGVfcHJvZHVjdCcpXSwKICAgICAgICBbSW5saW5lS2V5Ym9hcmRCdXR0b24oIvCfk6Ig2KXYsNin2LnYqSIsIGNhbGxiYWNrX2RhdGE9J2Jyb2FkY2FzdCcpXSwKICAgICAgICBbSW5saW5lS2V5Ym9hcmRCdXR0b24oIvCfk7og2KXYr9in2LHYqSDYp9mE2YLZhtmI2KfYqiIsIGNhbGxiYWNrX2RhdGE9J21hbmFnZV9jaGFubmVscycpXSwKICAgICAgICBbSW5saW5lS2V5Ym9hcmRCdXR0b24oIvCfjqsg2KXZhti02KfYoSDZg9mI2K8g2YfYr9mK2KkiLCBjYWxsYmFja19kYXRhPSdjcmVhdGVfZ2lmdF9jb2RlJyldLAogICAgICAgIFtJbmxpbmVLZXlib2FyZEJ1dHRvbigi8J+UhCDYrdin2YTYqSDYp9mE2KjZiNiqIiwgY2FsbGJhY2tfZGF0YT0ndG9nZ2xlX2JvdF9zdGF0dXMnKV0sCiAgICAgICAgW0lubGluZUtleWJvYXJkQnV0dG9uKCLwn5SZINix2KzZiNi5IiwgY2FsbGJhY2tfZGF0YT0nYmFja190b19tYWluJyldCiAgICBdCiAgICByZXR1cm4gSW5saW5lS2V5Ym9hcmRNYXJrdXAoa2V5Ym9hcmQpCgojINij2YXYsSDYp9mE2KjYr9ihCmFzeW5jIGRlZiBzdGFydCh1cGRhdGU6IFVwZGF0ZSwgY29udGV4dDogQ29udGV4dFR5cGVzLkRFRkFVTFRfVFlQRSk6CiAgICB1c2VyID0gdXBkYXRlLmVmZmVjdGl2ZV91c2VyCiAgICB1c2VyX2lkID0gdXNlci5pZAogICAgdXNlcm5hbWUgPSB1c2VyLnVzZXJuYW1lIG9yIHVzZXIuZmlyc3RfbmFtZQogICAgCiAgICBib3Rfc3RhdHVzID0gZ2V0X3NldHRpbmcoJ2JvdF9zdGF0dXMnKQogICAgCiAgICByZWZlcnJlcl9pZCA9IE5vbmUKICAgIGdpZnRfY29kZSA9IE5vbmUKICAgIAogICAgaWYgY29udGV4dC5hcmdzOgogICAgICAgIGFyZyA9IGNvbnRleHQuYXJnc1swXQogICAgICAgIGlmIGFyZy5zdGFydHN3aXRoKCdyZWYnKToKICAgICAgICAgICAgdHJ5OgogICAgICAgICAgICAgICAgcmVmZXJyZXJfaWQgPSBpbnQoYXJnWzM6XSkKICAgICAgICAgICAgZXhjZXB0OgogICAgICAgICAgICAgICAgcGFzcwogICAgICAgIGVsaWYgYXJnLnN0YXJ0c3dpdGgoJ2dpZnQnKToKICAgICAgICAgICAgZ2lmdF9jb2RlID0gYXJnWzQ6XQogICAgCiAgICBleGlzdGluZ191c2VyID0gZ2V0X3VzZXIodXNlcl9pZCkKICAgIAogICAgaWYgbm90IGV4aXN0aW5nX3VzZXI6CiAgICAgICAgYWRkX3VzZXIodXNlcl9pZCwgdXNlcm5hbWUsIHJlZmVycmVyX2lkKQogICAgICAgIAogICAgICAgIGlmIHJlZmVycmVyX2lkIGFuZCByZWZlcnJlcl9pZCAhPSB1c2VyX2lkOgogICAgICAgICAgICBpc19zdWJzY3JpYmVkID0gYXdhaXQgY2hlY2tfc3Vic2NyaXB0aW9uKHVzZXJfaWQsIGNvbnRleHQpCiAgICAgICAgICAgIGlmIGlzX3N1YnNjcmliZWQ6CiAgICAgICAgICAgICAgICByZWZlcnJhbF9wb2ludHMgPSBpbnQoZ2V0X3NldHRpbmcoJ3JlZmVycmFsX3BvaW50cycpKQogICAgICAgICAgICAgICAgdXBkYXRlX3BvaW50cyhyZWZlcnJlcl9pZCwgcmVmZXJyYWxfcG9pbnRzKQogICAgICAgICAgICAgICAgYWRkX3RyYW5zYWN0aW9uKHJlZmVycmVyX2lkLCAncmVmZXJyYWwnLCByZWZlcnJhbF9wb2ludHMsIGYn2K/YudmI2Kkge3VzZXJuYW1lfScpCiAgICAgICAgICAgICAgICB0cnk6CiAgICAgICAgICAgICAgICAgICAgYXdhaXQgY29udGV4dC5ib3Quc2VuZF9tZXNzYWdlKAogICAgICAgICAgICAgICAgICAgICAgICByZWZlcnJlcl9pZCwKICAgICAgICAgICAgICAgICAgICAgICAgZiLwn46JINiq2YfYp9mG2YrZhtinISDYrdi12YTYqiDYudmE2Ykge3JlZmVycmFsX3BvaW50c30g2YbZgti32Kkg2YXZhiDYr9i52YjYqSB7dXNlcm5hbWV9IgogICAgICAgICAgICAgICAgICAgICkKICAgICAgICAgICAgICAgIGV4Y2VwdDoKICAgICAgICAgICAgICAgICAgICBwYXNzCiAgICAKICAgIGlmIGdpZnRfY29kZToKICAgICAgICBjb25uID0gc3FsaXRlMy5jb25uZWN0KCdwb2ludHNfYm90LmRiJykKICAgICAgICBjID0gY29ubi5jdXJzb3IoKQogICAgICAgIAogICAgICAgIGMuZXhlY3V0ZSgnU0VMRUNUICogRlJPTSBnaWZ0X2NvZGVzIFdIRVJFIGNvZGUgPSA/JywgKGdpZnRfY29kZSwpKQogICAgICAgIGNvZGVfZGF0YSA9IGMuZmV0Y2hvbmUoKQogICAgICAgIAogICAgICAgIGlmIGNvZGVfZGF0YSBhbmQgY29kZV9kYXRhWzNdIDwgY29kZV9kYXRhWzJdOgogICAgICAgICAgICBjLmV4ZWN1dGUoJ1NFTEVDVCAqIEZST00gY29kZV91c2VycyBXSEVSRSBjb2RlID0gPyBBTkQgdXNlcl9pZCA9ID8nLCAoZ2lmdF9jb2RlLCB1c2VyX2lkKSkKICAgICAgICAgICAgdXNlZF9iZWZvcmUgPSBjLmZldGNob25lKCkKICAgICAgICAgICAgCiAgICAgICAgICAgIGlmIG5vdCB1c2VkX2JlZm9yZToKICAgICAgICAgICAgICAgIHVwZGF0ZV9wb2ludHModXNlcl9pZCwgY29kZV9kYXRhWzFdKQogICAgICAgICAgICAgICAgYWRkX3RyYW5zYWN0aW9uKHVzZXJfaWQsICdnaWZ0X2NvZGUnLCBjb2RlX2RhdGFbMV0sIGYn2YPZiNivINmH2K/ZitipOiB7Z2lmdF9jb2RlfScpCiAgICAgICAgICAgICAgICAKICAgICAgICAgICAgICAgIGMuZXhlY3V0ZSgnVVBEQVRFIGdpZnRfY29kZXMgU0VUIHVzZWRfY291bnQgPSB1c2VkX2NvdW50ICsgMSBXSEVSRSBjb2RlID0gPycsIChnaWZ0X2NvZGUsKSkKICAgICAgICAgICAgICAgIGMuZXhlY3V0ZSgnSU5TRVJUIElOVE8gY29kZV91c2VycyAoY29kZSwgdXNlcl9pZCkgVkFMVUVTICg/LCA/KScsIChnaWZ0X2NvZGUsIHVzZXJfaWQpKQogICAgICAgICAgICAgICAgY29ubi5jb21taXQoKQogICAgICAgICAgICAgICAgCiAgICAgICAgICAgICAgICBhd2FpdCB1cGRhdGUubWVzc2FnZS5yZXBseV90ZXh0KAogICAgICAgICAgICAgICAgICAgIGYi8J+OgSDYqtmH2KfZhtmK2YbYpyEg2K3YtdmE2Kog2LnZhNmJIHtjb2RlX2RhdGFbMV19INmG2YLYt9ipINmF2YYg2YPZiNivINin2YTZh9iv2YrYqSEiCiAgICAgICAgICAgICAgICApCiAgICAgICAgICAgIGVsc2U6CiAgICAgICAgICAgICAgICBhd2FpdCB1cGRhdGUubWVzc2FnZS5yZXBseV90ZXh0KCLimqDvuI8g2YTZgtivINin2LPYqtiu2K/ZhdiqINmH2LDYpyDYp9mE2YPZiNivINmF2YYg2YLYqNmEISIpCiAgICAgICAgZWxpZiBjb2RlX2RhdGE6CiAgICAgICAgICAgIGF3YWl0IHVwZGF0ZS5tZXNzYWdlLnJlcGx5X3RleHQoIuKaoO+4jyDZh9iw2Kcg2KfZhNmD2YjYryDYp9mG2KrZh9mJISIpCiAgICAgICAgZWxzZToKICAgICAgICAgICAgYXdhaXQgdXBkYXRlLm1lc3NhZ2UucmVwbHlfdGV4dCgi4p2MINmD2YjYryDYutmK2LEg2LXYrdmK2K0hIikKICAgICAgICAKICAgICAgICBjb25uLmNsb3NlKCkKICAgIAogICAgaWYgbm90IGF3YWl0IGNoZWNrX3N1YnNjcmlwdGlvbih1c2VyX2lkLCBjb250ZXh0KToKICAgICAgICBjaGFubmVscyA9IGdldF9jaGFubmVscygpCiAgICAgICAga2V5Ym9hcmQgPSBbXQogICAgICAgIGZvciBjaGFubmVsIGluIGNoYW5uZWxzOgogICAgICAgICAgICBrZXlib2FyZC5hcHBlbmQoW0lubGluZUtleWJvYXJkQnV0dG9uKGYi8J+ToiDYp9i02KrYsdmDINmB2Yog2KfZhNmC2YbYp9ipIiwgdXJsPWYiaHR0cHM6Ly90Lm1lL3tjaGFubmVsWzFdfSIpXSkKICAgICAgICBrZXlib2FyZC5hcHBlbmQoW0lubGluZUtleWJvYXJkQnV0dG9uKCLinIUg2KrYrdmC2YIg2YXZhiDYp9mE2KfYtNiq2LHYp9mDIiwgY2FsbGJhY2tfZGF0YT0nY2hlY2tfc3Vic2NyaXB0aW9uJyldKQogICAgICAgIAogICAgICAgIGF3YWl0IHVwZGF0ZS5tZXNzYWdlLnJlcGx5X3RleHQoCiAgICAgICAgICAgICLimqDvuI8g2YrYrNioINi52YTZitmDINin2YTYp9i02KrYsdin2YMg2YHZiiDYp9mE2YLZhtmI2KfYqiDYp9mE2KrYp9mE2YrYqSDYo9mI2YTYp9mLOiIsCiAgICAgICAgICAgIHJlcGx5X21hcmt1cD1JbmxpbmVLZXlib2FyZE1hcmt1cChrZXlib2FyZCkKICAgICAgICApCiAgICAgICAgcmV0dXJuCiAgICAKICAgIGlmIGJvdF9zdGF0dXMgPT0gJ21haW50ZW5hbmNlJyBhbmQgdXNlcl9pZCAhPSBBRE1JTl9JRDoKICAgICAgICBhd2FpdCB1cGRhdGUubWVzc2FnZS5yZXBseV90ZXh0KAogICAgICAgICAgICAi8J+UpyDYp9mE2KjZiNiqINmB2Yog2YjYtti5INin2YTYtdmK2KfZhtipINit2KfZhNmK2KfZi1xuXG4iCiAgICAgICAgICAgICLYs9mI2YEg2YrYqtmFINil2K7YqNin2LHZgyDYudmG2K8g2KfZhtiq2YfYp9ihINin2YTYtdmK2KfZhtipLiDYtNmD2LHYp9mLINmE2LXYqNix2YMhIPCfmY8iCiAgICAgICAgKQogICAgICAgIHJldHVybgogICAgCiAgICB3ZWxjb21lX21lc3NhZ2UgPSBnZXRfc2V0dGluZygnd2VsY29tZV9tZXNzYWdlJykKICAgIGF3YWl0IHVwZGF0ZS5tZXNzYWdlLnJlcGx5X3RleHQod2VsY29tZV9tZXNzYWdlLCByZXBseV9tYXJrdXA9bWFpbl9rZXlib2FyZCh1c2VyX2lkKSkKCiMg2YXYudin2YTYrNipINin2YTYo9iy2LHYp9ixCmFzeW5jIGRlZiBidXR0b25faGFuZGxlcih1cGRhdGU6IFVwZGF0ZSwgY29udGV4dDogQ29udGV4dFR5cGVzLkRFRkFVTFRfVFlQRSk6CiAgICBxdWVyeSA9IHVwZGF0ZS5jYWxsYmFja19xdWVyeQogICAgYXdhaXQgcXVlcnkuYW5zd2VyKCkKICAgIAogICAgdXNlcl9pZCA9IHF1ZXJ5LmZyb21fdXNlci5pZAogICAgYm90X3N0YXR1cyA9IGdldF9zZXR0aW5nKCdib3Rfc3RhdHVzJykKICAgIAogICAgaWYgdXNlcl9pZCAhPSBBRE1JTl9JRCBhbmQgYm90X3N0YXR1cyA9PSAnbWFpbnRlbmFuY2UnOgogICAgICAgIGlmIHF1ZXJ5LmRhdGEgIT0gJ2NoZWNrX3N1YnNjcmlwdGlvbic6CiAgICAgICAgICAgIGF3YWl0IHF1ZXJ5Lm1lc3NhZ2UucmVwbHlfdGV4dCgKICAgICAgICAgICAgICAgICLwn5SnINin2YTYqNmI2Kog2YHZiiDZiNi22Lkg2KfZhNi12YrYp9mG2Kkg2K3Yp9mE2YrYp9mLXG5cbiIKICAgICAgICAgICAgICAgICLYs9mI2YEg2YrYqtmFINil2K7YqNin2LHZgyDYudmG2K8g2KfZhtiq2YfYp9ihINin2YTYtdmK2KfZhtipLiDYtNmD2LHYp9mLINmE2LXYqNix2YMhIPCfmY8iCiAgICAgICAgICAgICkKICAgICAgICAgICAgcmV0dXJuCiAgICAKICAgIGlmIHF1ZXJ5LmRhdGEgPT0gJ215X3BvaW50cyc6CiAgICAgICAgdXNlciA9IGdldF91c2VyKHVzZXJfaWQpCiAgICAgICAgcG9pbnRzID0gdXNlclsyXSBpZiB1c2VyIGVsc2UgMAogICAgICAgIHVzZXJuYW1lID0gcXVlcnkuZnJvbV91c2VyLnVzZXJuYW1lIG9yIHF1ZXJ5LmZyb21fdXNlci5maXJzdF9uYW1lCiAgICAgICAgCiAgICAgICAgY29ubiA9IHNxbGl0ZTMuY29ubmVjdCgncG9pbnRzX2JvdC5kYicpCiAgICAgICAgYyA9IGNvbm4uY3Vyc29yKCkKICAgICAgICBjLmV4ZWN1dGUoJ1NFTEVDVCBDT1VOVCgqKSBGUk9NIHVzZXJzIFdIRVJFIHJlZmVycmVyX2lkID0gPycsICh1c2VyX2lkLCkpCiAgICAgICAgcmVmZXJyYWxzID0gYy5mZXRjaG9uZSgpWzBdCiAgICAgICAgY29ubi5jbG9zZSgpCiAgICAgICAgCiAgICAgICAgYXdhaXQgcXVlcnkuZWRpdF9tZXNzYWdlX3RleHQoCiAgICAgICAgICAgIGYi8J+RpCDYp9mE2YXYs9iq2K7Yr9mFOiB7dXNlcm5hbWV9XG4iCiAgICAgICAgICAgIGYi8J+GlCBJRDogYHt1c2VyX2lkfWBcbiIKICAgICAgICAgICAgZiLwn5KwINix2LXZitiv2YMg2KfZhNit2KfZhNmKOiB7cG9pbnRzfSDZhtmC2LfYqVxuIgogICAgICAgICAgICBmIvCfkaUg2LnYr9ivINiv2LnZiNin2KrZgzoge3JlZmVycmFsc30iLAogICAgICAgICAgICBwYXJzZV9tb2RlPSdNYXJrZG93bicsCiAgICAgICAgICAgIHJlcGx5X21hcmt1cD1JbmxpbmVLZXlib2FyZE1hcmt1cChbW0lubGluZUtleWJvYXJkQnV0dG9uKCLwn5SZINix2KzZiNi5IiwgY2FsbGJhY2tfZGF0YT0nYmFja190b19tYWluJyldXSkKICAgICAgICApCiAgICAKICAgIGVsaWYgcXVlcnkuZGF0YSA9PSAnZGFpbHlfZ2lmdCc6CiAgICAgICAgdXNlciA9IGdldF91c2VyKHVzZXJfaWQpCiAgICAgICAgaWYgbm90IHVzZXI6CiAgICAgICAgICAgIGF3YWl0IHF1ZXJ5Lm1lc3NhZ2UucmVwbHlfdGV4dCgi4p2MINit2K/YqyDYrti32KMhIikKICAgICAgICAgICAgcmV0dXJuCiAgICAgICAgCiAgICAgICAgbGFzdF9naWZ0ID0gdXNlcls1XQogICAgICAgIHRvZGF5ID0gZGF0ZXRpbWUubm93KCkuc3RyZnRpbWUoJyVZLSVtLSVkJykKICAgICAgICAKICAgICAgICBpZiBsYXN0X2dpZnQgPT0gdG9kYXk6CiAgICAgICAgICAgIGF3YWl0IHF1ZXJ5LmFuc3dlcigi4pqg77iPINmE2YLYryDYp9iz2KrZhNmF2Kog2YfYr9mK2KrZgyDYp9mE2YrZiNmFISDYp9ix2KzYuSDYutiv2KfZiyDwn46BIiwgc2hvd19hbGVydD1UcnVlKQogICAgICAgICAgICByZXR1cm4KICAgICAgICAKICAgICAgICBnaWZ0X3BvaW50cyA9IGNhbGN1bGF0ZV9kYWlseV9naWZ0KCkKICAgICAgICB1cGRhdGVfcG9pbnRzKHVzZXJfaWQsIGdpZnRfcG9pbnRzKQogICAgICAgIGFkZF90cmFuc2FjdGlvbih1c2VyX2lkLCAnZ2lmdCcsIGdpZnRfcG9pbnRzLCAn2YfYr9mK2Kkg2YrZiNmF2YrYqScpCiAgICAgICAgCiAgICAgICAgY29ubiA9IHNxbGl0ZTMuY29ubmVjdCgncG9pbnRzX2JvdC5kYicpCiAgICAgICAgYyA9IGNvbm4uY3Vyc29yKCkKICAgICAgICBjLmV4ZWN1dGUoJ1VQREFURSB1c2VycyBTRVQgbGFzdF9naWZ0X2RhdGUgPSA/IFdIRVJFIHVzZXJfaWQgPSA/JywgKHRvZGF5LCB1c2VyX2lkKSkKICAgICAgICBjb25uLmNvbW1pdCgpCiAgICAgICAgY29ubi5jbG9zZSgpCiAgICAgICAgCiAgICAgICAgYXdhaXQgcXVlcnkuZWRpdF9tZXNzYWdlX3RleHQoCiAgICAgICAgICAgIGYi8J+OgSDYqtmH2KfZhtmK2YbYpyEg2K3YtdmE2Kog2LnZhNmJIHtnaWZ0X3BvaW50c30g2YbZgti32KkhXG5cbiIKICAgICAgICAgICAgZiLwn5KwINix2LXZitiv2YMg2KfZhNis2K/ZitivOiB7dXNlclsyXSArIGdpZnRfcG9pbnRzfSDZhtmC2LfYqSIsCiAgICAgICAgICAgIHJlcGx5X21hcmt1cD1JbmxpbmVLZXlib2FyZE1hcmt1cChbW0lubGluZUtleWJvYXJkQnV0dG9uKCLwn5SZINix2KzZiNi5IiwgY2FsbGJhY2tfZGF0YT0nYmFja190b19tYWluJyldXSkKICAgICAgICApCiAgICAKICAgIGVsaWYgcXVlcnkuZGF0YSA9PSAnc2hvcCcgb3IgcXVlcnkuZGF0YS5zdGFydHN3aXRoKCdzaG9wX3BhZ2VfJyk6CiAgICAgICAgcHJvZHVjdHMgPSBnZXRfcHJvZHVjdHMoKQogICAgICAgIGlmIG5vdCBwcm9kdWN0czoKICAgICAgICAgICAgYXdhaXQgcXVlcnkuZWRpdF9tZXNzYWdlX3RleHQoCiAgICAgICAgICAgICAgICAi8J+bkiDYp9mE2YXYqtis2LEg2YHYp9ix2Log2K3Yp9mE2YrYp9mLIiwKICAgICAgICAgICAgICAgIHJlcGx5X21hcmt1cD1JbmxpbmVLZXlib2FyZE1hcmt1cChbW0lubGluZUtleWJvYXJkQnV0dG9uKCLwn5SZINix2KzZiNi5IiwgY2FsbGJhY2tfZGF0YT0nYmFja190b19tYWluJyldXSkKICAgICAgICAgICAgKQogICAgICAgICAgICByZXR1cm4KICAgICAgICAKICAgICAgICB1c2VyID0gZ2V0X3VzZXIodXNlcl9pZCkKICAgICAgICB1c2VyX3BvaW50cyA9IHVzZXJbMl0gaWYgdXNlciBlbHNlIDAKICAgICAgICAKICAgICAgICBjdXJyZW50X3BhZ2UgPSAwCiAgICAgICAgaWYgcXVlcnkuZGF0YS5zdGFydHN3aXRoKCdzaG9wX3BhZ2VfJyk6CiAgICAgICAgICAgIGN1cnJlbnRfcGFnZSA9IGludChxdWVyeS5kYXRhLnNwbGl0KCdfJylbMl0pCiAgICAgICAgCiAgICAgICAgaXRlbXNfcGVyX3BhZ2UgPSAxMQogICAgICAgIHRvdGFsX3BhZ2VzID0gKGxlbihwcm9kdWN0cykgLSAxKSAvLyBpdGVtc19wZXJfcGFnZSArIDEKICAgICAgICAKICAgICAgICBzdGFydF9pZHggPSBjdXJyZW50X3BhZ2UgKiBpdGVtc19wZXJfcGFnZQogICAgICAgIGVuZF9pZHggPSBtaW4oc3RhcnRfaWR4ICsgaXRlbXNfcGVyX3BhZ2UsIGxlbihwcm9kdWN0cykpCiAgICAgICAgcGFnZV9wcm9kdWN0cyA9IHByb2R1Y3RzW3N0YXJ0X2lkeDplbmRfaWR4XQogICAgICAgIAogICAgICAgIGtleWJvYXJkID0gW10KICAgICAgICAKICAgICAgICBrZXlib2FyZC5hcHBlbmQoWwogICAgICAgICAgICBJbmxpbmVLZXlib2FyZEJ1dHRvbigi8J+UjSDYqNit2KsiLCBjYWxsYmFja19kYXRhPSdzZWFyY2hfcHJvZHVjdCcpLAogICAgICAgICAgICBJbmxpbmVLZXlib2FyZEJ1dHRvbigi8J+SsCDYrdiz2Kgg2YbZgtin2LfZiiIsIGNhbGxiYWNrX2RhdGE9J3Nob3BfYnlfcG9pbnRzJykKICAgICAgICBdKQogICAgICAgIAogICAgICAgIGZvciBwcm9kdWN0IGluIHBhZ2VfcHJvZHVjdHM6CiAgICAgICAgICAgIG5hbWUgPSBwcm9kdWN0WzFdWzoyNV0gKyAiLi4iIGlmIGxlbihwcm9kdWN0WzFdKSA+IDI1IGVsc2UgcHJvZHVjdFsxXQogICAgICAgICAgICAKICAgICAgICAgICAga2V5Ym9hcmQuYXBwZW5kKFsKICAgICAgICAgICAgICAgIElubGluZUtleWJvYXJkQnV0dG9uKGYie25hbWV9IiwgY2FsbGJhY2tfZGF0YT1mJ2J1eV97cHJvZHVjdFswXX0nKSwKICAgICAgICAgICAgICAgIElubGluZUtleWJvYXJkQnV0dG9uKGYi8J+StXtwcm9kdWN0WzJdfSIsIGNhbGxiYWNrX2RhdGE9ZididXlfe3Byb2R1Y3RbMF19JykKICAgICAgICAgICAgXSkKICAgICAgICAKICAgICAgICBuYXZfYnV0dG9ucyA9IFtdCiAgICAgICAgaWYgY3VycmVudF9wYWdlID4gMDoKICAgICAgICAgICAgbmF2X2J1dHRvbnMuYXBwZW5kKElubGluZUtleWJvYXJkQnV0dG9uKCLij64g2KfZhNiz2KfYqNmCIiwgY2FsbGJhY2tfZGF0YT1mJ3Nob3BfcGFnZV97Y3VycmVudF9wYWdlIC0gMX0nKSkKICAgICAgICBpZiBjdXJyZW50X3BhZ2UgPCB0b3RhbF9wYWdlcyAtIDE6CiAgICAgICAgICAgIG5hdl9idXR0b25zLmFwcGVuZChJbmxpbmVLZXlib2FyZEJ1dHRvbigi2KfZhNiq2KfZhNmKIOKPrSIsIGNhbGxiYWNrX2RhdGE9ZidzaG9wX3BhZ2Vfe2N1cnJlbnRfcGFnZSArIDF9JykpCiAgICAgICAgCiAgICAgICAgaWYgbmF2X2J1dHRvbnM6CiAgICAgICAgICAgIGtleWJvYXJkLmFwcGVuZChuYXZfYnV0dG9ucykKICAgICAgICAKICAgICAgICBrZXlib2FyZC5hcHBlbmQoW0lubGluZUtleWJvYXJkQnV0dG9uKCLwn5SZINix2KzZiNi5IiwgY2FsbGJhY2tfZGF0YT0nYmFja190b19tYWluJyldKQogICAgICAgIAogICAgICAgIGF3YWl0IHF1ZXJ5LmVkaXRfbWVzc2FnZV90ZXh0KAogICAgICAgICAgICBmIvCflKUg2KfZhNi52LHZiNi2INin2YTYqtmKINmK2YLYr9mF2YfYpyDYp9mE2KjZiNiqIPCflKVcblxuIgogICAgICAgICAgICBmIuKUgeKUgeKUgeKUgeKUgeKUgeKUgeKUgeKUgeKUgeKUgeKUgeKUgeKUgeKUgVxuIgogICAgICAgICAgICBmIvCfkrAg2LHYtdmK2K/Zgzoge3VzZXJfcG9pbnRzfSDZhtmC2LfYqVxuIgogICAgICAgICAgICBmIvCfk6Yg2KfZhNmF2YbYqtis2KfYqjoge2xlbihwcm9kdWN0cyl9XG4iCiAgICAgICAgICAgIGYi8J+ThCDYp9mE2LXZgdit2Kk6IHtjdXJyZW50X3BhZ2UgKyAxfS97dG90YWxfcGFnZXN9XG4iCiAgICAgICAgICAgIGYi4pSB4pSB4pSB4pSB4pSB4pSB4pSB4pSB4pSB4pSB4pSB4pSB4pSB4pSB4pSBXG5cbiIKICAgICAgICAgICAgIi0g2KfZhNi52LHZiNi2INin2YTYqtmKINmK2YXZg9mG2YMg2LTYsdin2KbZh9inIC0iLAogICAgICAgICAgICByZXBseV9tYXJrdXA9SW5saW5lS2V5Ym9hcmRNYXJrdXAoa2V5Ym9hcmQpCiAgICAgICAgKQogICAgCiAgICBlbGlmIHF1ZXJ5LmRhdGEgPT0gJ3NlYXJjaF9wcm9kdWN0JzoKICAgICAgICBjb250ZXh0LnVzZXJfZGF0YVsnc3RhdGUnXSA9ICdzZWFyY2hfcHJvZHVjdCcKICAgICAgICBhd2FpdCBxdWVyeS5lZGl0X21lc3NhZ2VfdGV4dCgKICAgICAgICAgICAgIvCflI0g2KPYsdiz2YQg2KfYs9mFINin2YTZhdmG2KrYrCDZhNmE2KjYrdirOiIsCiAgICAgICAgICAgIHJlcGx5X21hcmt1cD1JbmxpbmVLZXlib2FyZE1hcmt1cChbW0lubGluZUtleWJvYXJkQnV0dG9uKCLinYwg2KXZhNi62KfYoSIsIGNhbGxiYWNrX2RhdGE9J3Nob3AnKV1dKQogICAgICAgICkKICAgIAogICAgZWxpZiBxdWVyeS5kYXRhID09ICd0cmFuc2FjdGlvbnMnOgogICAgICAgIGNvbm4gPSBzcWxpdGUzLmNvbm5lY3QoJ3BvaW50c19ib3QuZGInKQogICAgICAgIGMgPSBjb25uLmN1cnNvcigpCiAgICAgICAgYy5leGVjdXRlKCdTRUxFQ1QgKiBGUk9NIHRyYW5zYWN0aW9ucyBXSEVSRSB1c2VyX2lkID0gPyBPUkRFUiBCWSBpZCBERVNDIExJTUlUIDEwJywgKHVzZXJfaWQsKSkKICAgICAgICB0cmFuc2FjdGlvbnMgPSBjLmZldGNoYWxsKCkKICAgICAgICBjb25uLmNsb3NlKCkKICAgICAgICAKICAgICAgICBpZiBub3QgdHJhbnNhY3Rpb25zOgogICAgICAgICAgICBhd2FpdCBxdWVyeS5lZGl0X21lc3NhZ2VfdGV4dCgKICAgICAgICAgICAgICAgICLwn5OKINmE2Kcg2KrZiNis2K8g2YXYudin2YXZhNin2Kog2KjYudivISIsCiAgICAgICAgICAgICAgICByZXBseV9tYXJrdXA9SW5saW5lS2V5Ym9hcmRNYXJrdXAoW1tJbmxpbmVLZXlib2FyZEJ1dHRvbigi8J+UmSDYsdis2YjYuSIsIGNhbGxiYWNrX2RhdGE9J2JhY2tfdG9fbWFpbicpXV0pCiAgICAgICAgICAgICkKICAgICAgICAgICAgcmV0dXJuCiAgICAgICAgCiAgICAgICAgdGV4dCA9ICLwn5OKINii2K7YsSAxMCDZhdi52KfZhdmE2KfYqjpcblxuIgogICAgICAgIGZvciB0cmFucyBpbiB0cmFuc2FjdGlvbnM6CiAgICAgICAgICAgIGVtb2ppID0gIuKelSIgaWYgdHJhbnNbM10gPiAwIGVsc2UgIuKeliIKICAgICAgICAgICAgdGV4dCArPSBmIntlbW9qaX0ge2Ficyh0cmFuc1szXSl9INmG2YLYt9ipIC0ge3RyYW5zWzRdfVxu8J+ThSB7dHJhbnNbNV19XG5cbiIKICAgICAgICAKICAgICAgICBhd2FpdCBxdWVyeS5lZGl0X21lc3NhZ2VfdGV4dCgKICAgICAgICAgICAgdGV4dCwKICAgICAgICAgICAgcmVwbHlfbWFya3VwPUlubGluZUtleWJvYXJkTWFya3VwKFtbSW5saW5lS2V5Ym9hcmRCdXR0b24oIvCflJkg2LHYrNmI2LkiLCBjYWxsYmFja19kYXRhPSdiYWNrX3RvX21haW4nKV1dKQogICAgICAgICkKICAgIAogICAgZWxpZiBxdWVyeS5kYXRhID09ICdzaG9wX2J5X3BvaW50cyc6CiAgICAgICAgdXNlciA9IGdldF91c2VyKHVzZXJfaWQpCiAgICAgICAgdXNlcl9wb2ludHMgPSB1c2VyWzJdIGlmIHVzZXIgZWxzZSAwCiAgICAgICAgCiAgICAgICAgcHJvZHVjdHMgPSBnZXRfcHJvZHVjdHMoKQogICAgICAgIGFmZm9yZGFibGUgPSBbcCBmb3IgcCBpbiBwcm9kdWN0cyBpZiBwWzJdIDw9IHVzZXJfcG9pbnRzXQogICAgICAgIAogICAgICAgIGlmIG5vdCBhZmZvcmRhYmxlOgogICAgICAgICAgICBhd2FpdCBxdWVyeS5hbnN3ZXIoIuKdjCDZhNinINiq2YjYrNivINmF2YbYqtis2KfYqiDZitmF2YPZhtmDINi02LHYp9ik2YfYpyDYrdin2YTZitin2YsiLCBzaG93X2FsZXJ0PVRydWUpCiAgICAgICAgICAgIHJldHVybgogICAgICAgIAogICAgICAgIGtleWJvYXJkID0gW10KICAgICAgICBmb3IgcHJvZHVjdCBpbiBhZmZvcmRhYmxlOgogICAgICAgICAgICBrZXlib2FyZC5hcHBlbmQoW0lubGluZUtleWJvYXJkQnV0dG9uKAogICAgICAgICAgICAgICAgZiLinIUge3Byb2R1Y3RbMV19IC0ge3Byb2R1Y3RbMl19INmG2YLYt9ipIiwKICAgICAgICAgICAgICAgIGNhbGxiYWNrX2RhdGE9ZididXlfe3Byb2R1Y3RbMF19JwogICAgICAgICAgICApXSkKICAgICAgICBrZXlib2FyZC5hcHBlbmQoW0lubGluZUtleWJvYXJkQnV0dG9uKCLwn5SZINix2KzZiNi5INmE2YTZhdiq2KzYsSIsIGNhbGxiYWNrX2RhdGE9J3Nob3AnKV0pCiAgICAgICAgCiAgICAgICAgYXdhaXQgcXVlcnkuZWRpdF9tZXNzYWdlX3RleHQoCiAgICAgICAgICAgIGYi8J+bkiDYp9mE2YXZhtiq2KzYp9iqINin2YTZhdiq2KfYrdipINmE2YNcbvCfkrAg2LHYtdmK2K/Zgzoge3VzZXJfcG9pbnRzfSDZhtmC2LfYqVxuXG4iCiAgICAgICAgICAgIGYi2LnYr9ivINin2YTZhdmG2KrYrNin2Ko6IHtsZW4oYWZmb3JkYWJsZSl9IiwKICAgICAgICAgICAgcmVwbHlfbWFya3VwPUlubGluZUtleWJvYXJkTWFya3VwKGtleWJvYXJkKQogICAgICAgICkKICAgIAogICAgZWxpZiBxdWVyeS5kYXRhLnN0YXJ0c3dpdGgoJ2J1eV9zdGFyc18nKToKICAgICAgICBpZiBxdWVyeS5kYXRhID09ICdidXlfc3RhcnNfY3VzdG9tJzoKICAgICAgICAgICAgY29udGV4dC51c2VyX2RhdGFbJ3N0YXRlJ10gPSAnYnV5X3N0YXJzJwogICAgICAgICAgICBzdGFyc19yYXRpbyA9IGludChnZXRfc2V0dGluZygnc3RhcnNfcmF0aW8nKSkKICAgICAgICAgICAgYXdhaXQgcXVlcnkuZWRpdF9tZXNzYWdlX3RleHQoCiAgICAgICAgICAgICAgICBmIuKtkCDZg9mEINmG2KzZhdipID0ge3N0YXJzX3JhdGlvfSDZhtmC2LfYqVxuXG4iCiAgICAgICAgICAgICAgICAi2KPYsdiz2YQg2LnYr9ivINin2YTZhtis2YjZhSDYp9mE2KrZiiDYqtix2YrYryDYtNix2KfYodmH2Kc6IiwKICAgICAgICAgICAgICAgIHJlcGx5X21hcmt1cD1JbmxpbmVLZXlib2FyZE1hcmt1cChbW0lubGluZUtleWJvYXJkQnV0dG9uKCLinYwg2KXZhNi62KfYoSIsIGNhbGxiYWNrX2RhdGE9J2J1eV9zdGFycycpXV0pCiAgICAgICAgICAgICkKICAgICAgICAgICAgcmV0dXJuIFdBSVRJTkdfU1RBUlNfQU1PVU5UCiAgICAgICAgZWxzZToKICAgICAgICAgICAgc3RhcnMgPSBpbnQocXVlcnkuZGF0YS5zcGxpdCgnXycpWzJdKQogICAgICAgICAgICBzdGFyc19yYXRpbyA9IGludChnZXRfc2V0dGluZygnc3RhcnNfcmF0aW8nKSkKICAgICAgICAgICAgcG9pbnRzID0gc3RhcnMgKiBzdGFyc19yYXRpbwogICAgICAgICAgICAKICAgICAgICAgICAgdHJ5OgogICAgICAgICAgICAgICAgaW52b2ljZV9saW5rID0gYXdhaXQgY29udGV4dC5ib3QuY3JlYXRlX2ludm9pY2VfbGluaygKICAgICAgICAgICAgICAgICAgICB0aXRsZT1mIti02LHYp9ihIHtwb2ludHN9INmG2YLYt9ipIiwKICAgICAgICAgICAgICAgICAgICBkZXNjcmlwdGlvbj1mItin2K3YtdmEINi52YTZiSB7cG9pbnRzfSDZhtmC2LfYqSDZhdmC2KfYqNmEIHtzdGFyc30g2YbYrNmF2KkiLAogICAgICAgICAgICAgICAgICAgIHBheWxvYWQ9ZiJzdGFyc197dXNlcl9pZH1fe3BvaW50c30iLAogICAgICAgICAgICAgICAgICAgIHByb3ZpZGVyX3Rva2VuPSIiLAogICAgICAgICAgICAgICAgICAgIGN1cnJlbmN5PSJYVFIiLAogICAgICAgICAgICAgICAgICAgIHByaWNlcz1bTGFiZWxlZFByaWNlKCLZhtmC2KfYtyIsIHN0YXJzKV0KICAgICAgICAgICAgICAgICkKICAgICAgICAgICAgICAgIAogICAgICAgICAgICAgICAgYXdhaXQgcXVlcnkuZWRpdF9tZXNzYWdlX3RleHQoCiAgICAgICAgICAgICAgICAgICAgZiLirZAg2LHYp9io2Lcg2KfZhNiv2YHYuSDYrNin2YfYsiFcblxuIgogICAgICAgICAgICAgICAgICAgIGYi8J+SqyDYp9mE2YbYrNmI2YU6IHtzdGFyc31cbiIKICAgICAgICAgICAgICAgICAgICBmIvCfko4g2KfZhNmG2YLYp9i3OiB7cG9pbnRzfVxuXG4iCiAgICAgICAgICAgICAgICAgICAgZiLwn5SXINin2LbYuti3INi52YTZiSDYp9mE2LHYp9io2Lc6XG57aW52b2ljZV9saW5rfSIsCiAgICAgICAgICAgICAgICAgICAgcmVwbHlfbWFya3VwPUlubGluZUtleWJvYXJkTWFya3VwKFsKICAgICAgICAgICAgICAgICAgICAgICAgW0lubGluZUtleWJvYXJkQnV0dG9uKCLwn5SZINix2KzZiNi5INmE2YTYqNin2YLYp9iqIiwgY2FsbGJhY2tfZGF0YT0nYnV5X3N0YXJzJyldLAogICAgICAgICAgICAgICAgICAgICAgICBbSW5saW5lS2V5Ym9hcmRCdXR0b24oIvCfj6Ag2KfZhNmC2KfYptmF2Kkg2KfZhNix2KbZitiz2YrYqSIsIGNhbGxiYWNrX2RhdGE9J2JhY2tfdG9fbWFpbicpXQogICAgICAgICAgICAgICAgICAgIF0pCiAgICAgICAgICAgICAgICApCiAgICAgICAgICAgIGV4Y2VwdCBFeGNlcHRpb24gYXMgZToKICAgICAgICAgICAgICAgIGF3YWl0IHF1ZXJ5LmFuc3dlcihmIuKdjCDYrti32KM6IHtzdHIoZSl9Iiwgc2hvd19hbGVydD1UcnVlKQogICAgCiAgICBlbGlmIHF1ZXJ5LmRhdGEuc3RhcnRzd2l0aCgnYnV5XycpIGFuZCBub3QgcXVlcnkuZGF0YS5zdGFydHN3aXRoKCdidXlfc3RhcnMnKToKICAgICAgICB0cnk6CiAgICAgICAgICAgIHByb2R1Y3RfaWQgPSBpbnQocXVlcnkuZGF0YS5zcGxpdCgnXycpWzFdKQogICAgICAgIGV4Y2VwdCBWYWx1ZUVycm9yOgogICAgICAgICAgICByZXR1cm4KICAgICAgICAKICAgICAgICBjb25uID0gc3FsaXRlMy5jb25uZWN0KCdwb2ludHNfYm90LmRiJykKICAgICAgICBjID0gY29ubi5jdXJzb3IoKQogICAgICAgIGMuZXhlY3V0ZSgnU0VMRUNUICogRlJPTSBwcm9kdWN0cyBXSEVSRSBpZCA9ID8nLCAocHJvZHVjdF9pZCwpKQogICAgICAgIHByb2R1Y3QgPSBjLmZldGNob25lKCkKICAgICAgICBjb25uLmNsb3NlKCkKICAgICAgICAKICAgICAgICBpZiBub3QgcHJvZHVjdDoKICAgICAgICAgICAgYXdhaXQgcXVlcnkuYW5zd2VyKCLinYwg2KfZhNmF2YbYqtisINi62YrYsSDZhdmI2KzZiNivISIsIHNob3dfYWxlcnQ9VHJ1ZSkKICAgICAgICAgICAgcmV0dXJuCiAgICAgICAgCiAgICAgICAgdXNlciA9IGdldF91c2VyKHVzZXJfaWQpCiAgICAgICAgCiAgICAgICAga2V5Ym9hcmQgPSBbXQogICAgICAgIGlmIHVzZXJbMl0gPj0gcHJvZHVjdFsyXToKICAgICAgICAgICAga2V5Ym9hcmQuYXBwZW5kKFtJbmxpbmVLZXlib2FyZEJ1dHRvbigi4pyFINiq2KPZg9mK2K8g2KfZhNi02LHYp9ihIiwgY2FsbGJhY2tfZGF0YT1mJ2NvbmZpcm1fYnV5X3twcm9kdWN0X2lkfScpXSkKICAgICAgICBrZXlib2FyZC5hcHBlbmQoW0lubGluZUtleWJvYXJkQnV0dG9uKCLwn5SZINix2KzZiNi5INmE2YTZhdiq2KzYsSIsIGNhbGxiYWNrX2RhdGE9J3Nob3AnKV0pCiAgICAgICAgCiAgICAgICAgc3RhdHVzID0gIuKchSDZitmF2YPZhtmDINin2YTYtNix2KfYoSIgaWYgdXNlclsyXSA+PSBwcm9kdWN0WzJdIGVsc2UgIuKdjCDYsdi12YrYr9mDINi62YrYsSDZg9in2YHZiiIKICAgICAgICAKICAgICAgICBhd2FpdCBxdWVyeS5lZGl0X21lc3NhZ2VfdGV4dCgKICAgICAgICAgICAgZiLwn5uN77iPINiq2YHYp9i12YrZhCDYp9mE2YXZhtiq2KxcbiIKICAgICAgICAgICAgZiLilIHilIHilIHilIHilIHilIHilIHilIHilIHilIHilIHilIHilIHilIHilIFcbiIKICAgICAgICAgICAgZiLwn5OmINin2YTYp9iz2YU6IHtwcm9kdWN0WzFdfVxuIgogICAgICAgICAgICBmIvCfkrAg2KfZhNiz2LnYsToge3Byb2R1Y3RbMl19INmG2YLYt9ipXG4iCiAgICAgICAgICAgIGYi8J+SsyDYsdi12YrYr9mDOiB7dXNlclsyXX0g2YbZgti32KlcbiIKICAgICAgICAgICAgZiLilIHilIHilIHilIHilIHilIHilIHilIHilIHilIHilIHilIHilIHilIHilIFcblxuIgogICAgICAgICAgICBmIntzdGF0dXN9IiwKICAgICAgICAgICAgcmVwbHlfbWFya3VwPUlubGluZUtleWJvYXJkTWFya3VwKGtleWJvYXJkKQogICAgICAgICkKICAgIAogICAgZWxpZiBxdWVyeS5kYXRhLnN0YXJ0c3dpdGgoJ2NvbmZpcm1fYnV5XycpOgogICAgICAgIHByb2R1Y3RfaWQgPSBpbnQocXVlcnkuZGF0YS5zcGxpdCgnXycpWzJdKQogICAgICAgIGNvbm4gPSBzcWxpdGUzLmNvbm5lY3QoJ3BvaW50c19ib3QuZGInKQogICAgICAgIGMgPSBjb25uLmN1cnNvcigpCiAgICAgICAgYy5leGVjdXRlKCdTRUxFQ1QgKiBGUk9NIHByb2R1Y3RzIFdIRVJFIGlkID0gPycsIChwcm9kdWN0X2lkLCkpCiAgICAgICAgcHJvZHVjdCA9IGMuZmV0Y2hvbmUoKQogICAgICAgIGNvbm4uY2xvc2UoKQogICAgICAgIAogICAgICAgIGlmIG5vdCBwcm9kdWN0OgogICAgICAgICAgICBhd2FpdCBxdWVyeS5hbnN3ZXIoIuKdjCDYp9mE2YXZhtiq2Kwg2LrZitixINmF2YjYrNmI2K8hIiwgc2hvd19hbGVydD1UcnVlKQogICAgICAgICAgICByZXR1cm4KICAgICAgICAKICAgICAgICB1c2VyID0gZ2V0X3VzZXIodXNlcl9pZCkKICAgICAgICBpZiB1c2VyWzJdIDwgcHJvZHVjdFsyXToKICAgICAgICAgICAgYXdhaXQgcXVlcnkuYW5zd2VyKGYi4p2MINix2LXZitiv2YMg2LrZitixINmD2KfZgdmKISDYqtit2KrYp9isIHtwcm9kdWN0WzJdfSDZhtmC2LfYqSIsIHNob3dfYWxlcnQ9VHJ1ZSkKICAgICAgICAgICAgcmV0dXJuCiAgICAgICAgCiAgICAgICAgdXBkYXRlX3BvaW50cyh1c2VyX2lkLCAtcHJvZHVjdFsyXSkKICAgICAgICBhZGRfdHJhbnNhY3Rpb24odXNlcl9pZCwgJ3B1cmNoYXNlJywgLXByb2R1Y3RbMl0sIGYn2LTYsdin2KEge3Byb2R1Y3RbMV19JykKICAgICAgICAKICAgICAgICB0cnk6CiAgICAgICAgICAgIGlmIHByb2R1Y3RbM10gPT0gJ3RleHQnOgogICAgICAgICAgICAgICAgYXdhaXQgY29udGV4dC5ib3Quc2VuZF9tZXNzYWdlKHVzZXJfaWQsIGYi4pyFINiq2YUg2KfZhNi02LHYp9ihINio2YbYrNin2K0hXG5cbvCfk50g2KfZhNmF2K3YqtmI2Yk6XG57cHJvZHVjdFs0XX0iKQogICAgICAgICAgICBlbGlmIHByb2R1Y3RbM10gPT0gJ3Bob3RvJzoKICAgICAgICAgICAgICAgIGF3YWl0IGNvbnRleHQuYm90LnNlbmRfcGhvdG8odXNlcl9pZCwgcHJvZHVjdFs0XSwgY2FwdGlvbj0i4pyFINiq2YUg2KfZhNi02LHYp9ihINio2YbYrNin2K0hIikKICAgICAgICAgICAgZWxpZiBwcm9kdWN0WzNdID09ICdmaWxlJzoKICAgICAgICAgICAgICAgIGF3YWl0IGNvbnRleHQuYm90LnNlbmRfZG9jdW1lbnQodXNlcl9pZCwgcHJvZHVjdFs0XSwgY2FwdGlvbj0i4pyFINiq2YUg2KfZhNi02LHYp9ihINio2YbYrNin2K0hIikKICAgICAgICBleGNlcHQgRXhjZXB0aW9uIGFzIGU6CiAgICAgICAgICAgIHVwZGF0ZV9wb2ludHModXNlcl9pZCwgcHJvZHVjdFsyXSkKICAgICAgICAgICAgYXdhaXQgcXVlcnkuYW5zd2VyKGYi4p2MINmB2LTZhCDYpdix2LPYp9mEINin2YTZhdmG2KrYrDoge3N0cihlKX0iLCBzaG93X2FsZXJ0PVRydWUpCiAgICAgICAgICAgIHJldHVybgogICAgICAgIAogICAgICAgIHRyeToKICAgICAgICAgICAgYnV5ZXIgPSBxdWVyeS5mcm9tX3VzZXIKICAgICAgICAgICAgYnV5ZXJfdXNlcm5hbWUgPSBmIkB7YnV5ZXIudXNlcm5hbWV9IiBpZiBidXllci51c2VybmFtZSBlbHNlICLZhNinINmK2YjYrNivIgogICAgICAgICAgICBidXllcl9uYW1lID0gYnV5ZXIuZmlyc3RfbmFtZSArICgiICIgKyBidXllci5sYXN0X25hbWUgaWYgYnV5ZXIubGFzdF9uYW1lIGVsc2UgIiIpCiAgICAgICAgICAgIGJ1eWVyX2xpbmsgPSBmInRnOi8vdXNlcj9pZD17dXNlcl9pZH0iCiAgICAgICAgICAgIAogICAgICAgICAgICBhZG1pbl9ub3RpZmljYXRpb24gPSAoCiAgICAgICAgICAgICAgICBmIvCflJQg2LnZhdmE2YrYqSDYtNix2KfYoSDYrNiv2YrYr9ipIVxuXG4iCiAgICAgICAgICAgICAgICBmIvCfkaQg2KfZhNmF2LTYqtix2Yo6IHtidXllcl9uYW1lfVxuIgogICAgICAgICAgICAgICAgZiLwn4aUIElEOiBge3VzZXJfaWR9YFxuIgogICAgICAgICAgICAgICAgZiLwn5GB77iPINin2YTYsdin2KjYtzogW9mB2KrYrSDYp9mE2YXZhNmBINin2YTYtNiu2LXZil0oe2J1eWVyX2xpbmt9KVxuIgogICAgICAgICAgICAgICAgZiLwn5OxINin2YTZhdi52LHZgToge2J1eWVyX3VzZXJuYW1lfVxuXG4iCiAgICAgICAgICAgICAgICBmIvCfk6Yg2KfZhNmF2YbYqtisOiB7cHJvZHVjdFsxXX1cbiIKICAgICAgICAgICAgICAgIGYi8J+SsCDYp9mE2LPYudixOiB7cHJvZHVjdFsyXX0g2YbZgti32KlcblxuIgogICAgICAgICAgICAgICAgZiLwn5WQINin2YTZiNmC2Ko6IHtkYXRldGltZS5ub3coKS5zdHJmdGltZSgnJVktJW0tJWQgJUg6JU06JVMnKX0iCiAgICAgICAgICAgICkKICAgICAgICAgICAgCiAgICAgICAgICAgIGF3YWl0IGNvbnRleHQuYm90LnNlbmRfbWVzc2FnZSgKICAgICAgICAgICAgICAgIEFETUlOX0lELAogICAgICAgICAgICAgICAgYWRtaW5fbm90aWZpY2F0aW9uLAogICAgICAgICAgICAgICAgcGFyc2VfbW9kZT0nTWFya2Rvd24nCiAgICAgICAgICAgICkKICAgICAgICBleGNlcHQgRXhjZXB0aW9uIGFzIGU6CiAgICAgICAgICAgIGxvZ2dlci5lcnJvcihmItmB2LTZhCDYpdix2LPYp9mEINil2LTYudin2LEg2YTZhNmF2LTYsdmBOiB7ZX0iKQogICAgICAgIAogICAgICAgIGF3YWl0IHF1ZXJ5LmVkaXRfbWVzc2FnZV90ZXh0KAogICAgICAgICAgICBmIuKchSDYqtmFINin2YTYtNix2KfYoSDYqNmG2KzYp9itIVxuXG4iCiAgICAgICAgICAgIGYi8J+TpiDYp9mE2YXZhtiq2Kw6IHtwcm9kdWN0WzFdfVxuIgogICAgICAgICAgICBmIvCfkrAg2KrZhSDYrti12YU6IHtwcm9kdWN0WzJdfSDZhtmC2LfYqVxuIgogICAgICAgICAgICBmIvCfkrMg2LHYtdmK2K/ZgyDYp9mE2KzYr9mK2K86IHt1c2VyWzJdIC0gcHJvZHVjdFsyXX0g2YbZgti32KkiLAogICAgICAgICAgICByZXBseV9tYXJrdXA9SW5saW5lS2V5Ym9hcmRNYXJrdXAoW1tJbmxpbmVLZXlib2FyZEJ1dHRvbigi8J+UmSDYsdis2YjYuSIsIGNhbGxiYWNrX2RhdGE9J2JhY2tfdG9fbWFpbicpXV0pCiAgICAgICAgKQogICAgICAgIGF3YWl0IHF1ZXJ5LmFuc3dlcigi4pyFINiq2YUg2KfZhNi02LHYp9ihINio2YbYrNin2K0hIiwgc2hvd19hbGVydD1UcnVlKQogICAgCiAgICBlbGlmIHF1ZXJ5LmRhdGEgPT0gJ3RyYW5zZmVyJzoKICAgICAgICBjb250ZXh0LnVzZXJfZGF0YVsnc3RhdGUnXSA9ICd0cmFuc2Zlcl9hbW91bnQnCiAgICAgICAgYXdhaXQgcXVlcnkuZWRpdF9tZXNzYWdlX3RleHQoCiAgICAgICAgICAgICLwn5K4INij2LHYs9mEINi52K/YryDYp9mE2YbZgtin2Lcg2KfZhNiq2Yog2KrYsdmK2K8g2KrYrdmI2YrZhNmH2Kc6IiwKICAgICAgICAgICAgcmVwbHlfbWFya3VwPUlubGluZUtleWJvYXJkTWFya3VwKFtbSW5saW5lS2V5Ym9hcmRCdXR0b24oIuKdjCDYpdmE2LrYp9ihIiwgY2FsbGJhY2tfZGF0YT0nY2FuY2VsJyldXSkKICAgICAgICApCiAgICAgICAgcmV0dXJuIFdBSVRJTkdfVFJBTlNGRVJfQU1PVU5UCiAgICAKICAgIGVsaWYgcXVlcnkuZGF0YSA9PSAnYnV5X3N0YXJzJzoKICAgICAgICB1c2VyID0gZ2V0X3VzZXIodXNlcl9pZCkKICAgICAgICB1c2VyX3BvaW50cyA9IHVzZXJbMl0gaWYgdXNlciBlbHNlIDAKICAgICAgICBzdGFyc19yYXRpbyA9IGludChnZXRfc2V0dGluZygnc3RhcnNfcmF0aW8nKSkKICAgICAgICAKICAgICAgICBwYWNrYWdlcyA9IFsKICAgICAgICAgICAgKDEsIDEgKiBzdGFyc19yYXRpbywgIuKtkCIpLAogICAgICAgICAgICAoNSwgNSAqIHN0YXJzX3JhdGlvLCAi4q2Q4q2QIiksCiAgICAgICAgICAgICgxMCwgMTAgKiBzdGFyc19yYXRpbywgIuKtkOKtkOKtkCIpLAogICAgICAgICAgICAoMjAsIDIwICogc3RhcnNfcmF0aW8sICLwn5KrIiksCiAgICAgICAgICAgICg1MCwgNTAgKiBzdGFyc19yYXRpbywgIvCfjJ8iKSwKICAgICAgICAgICAgKDEwMCwgMTAwICogc3RhcnNfcmF0aW8sICLinKgiKQogICAgICAgIF0KICAgICAgICAKICAgICAgICBrZXlib2FyZCA9IFtdCiAgICAgICAgZm9yIHN0YXJzLCBwb2ludHMsIGVtb2ppIGluIHBhY2thZ2VzOgogICAgICAgICAgICBrZXlib2FyZC5hcHBlbmQoW0lubGluZUtleWJvYXJkQnV0dG9uKAogICAgICAgICAgICAgICAgZiJ7ZW1vaml9IHtzdGFyc30g2YbYrNmF2KkgPSB7cG9pbnRzfSDZhtmC2LfYqSIsCiAgICAgICAgICAgICAgICBjYWxsYmFja19kYXRhPWYnYnV5c3Rhcl97c3RhcnN9JwogICAgICAgICAgICApXSkKICAgICAgICAKICAgICAgICBrZXlib2FyZC5hcHBlbmQoW0lubGluZUtleWJvYXJkQnV0dG9uKCLwn5KzINmF2KjZhNi6INmF2K7Ytdi1IiwgY2FsbGJhY2tfZGF0YT0nYnV5X3N0YXJzX2N1c3RvbScpXSkKICAgICAgICBrZXlib2FyZC5hcHBlbmQoW0lubGluZUtleWJvYXJkQnV0dG9uKCLwn5SZINix2KzZiNi5IiwgY2FsbGJhY2tfZGF0YT0nYmFja190b19tYWluJyldKQogICAgICAgIAogICAgICAgIGF3YWl0IHF1ZXJ5LmVkaXRfbWVzc2FnZV90ZXh0KAogICAgICAgICAgICBmIuKtkCDYtNix2KfYoSDZhtmC2KfYtyDYqNin2YTZhtis2YjZhVxuXG4iCiAgICAgICAgICAgIGYi8J+SsCDYsdi12YrYr9mDINin2YTYrdin2YTZijoge3VzZXJfcG9pbnRzfSDZhtmC2LfYqVxuIgogICAgICAgICAgICBmIvCfk4og2KfZhNmG2LPYqNipOiDZg9mEINmG2KzZhdipID0ge3N0YXJzX3JhdGlvfSDZhtmC2LfYqVxuXG4iCiAgICAgICAgICAgIGYi2KfYrtiq2LEg2KfZhNio2KfZgtipOiIsCiAgICAgICAgICAgIHJlcGx5X21hcmt1cD1JbmxpbmVLZXlib2FyZE1hcmt1cChrZXlib2FyZCkKICAgICAgICApCiAgICAKICAgIGVsaWYgcXVlcnkuZGF0YS5zdGFydHN3aXRoKCdidXlzdGFyXycpOgogICAgICAgIHN0YXJzID0gaW50KHF1ZXJ5LmRhdGEuc3BsaXQoJ18nKVsxXSkKICAgICAgICBzdGFyc19yYXRpbyA9IGludChnZXRfc2V0dGluZygnc3RhcnNfcmF0aW8nKSkKICAgICAgICBwb2ludHMgPSBzdGFycyAqIHN0YXJzX3JhdGlvCiAgICAgICAgCiAgICAgICAgdHJ5OgogICAgICAgICAgICBpbnZvaWNlX2xpbmsgPSBhd2FpdCBjb250ZXh0LmJvdC5jcmVhdGVfaW52b2ljZV9saW5rKAogICAgICAgICAgICAgICAgdGl0bGU9ZiLYtNix2KfYoSB7cG9pbnRzfSDZhtmC2LfYqSIsCiAgICAgICAgICAgICAgICBkZXNjcmlwdGlvbj1mItin2K3YtdmEINi52YTZiSB7cG9pbnRzfSDZhtmC2LfYqSDZhdmC2KfYqNmEIHtzdGFyc30g2YbYrNmF2KkiLAogICAgICAgICAgICAgICAgcGF5bG9hZD1mInN0YXJzX3t1c2VyX2lkfV97cG9pbnRzfSIsCiAgICAgICAgICAgICAgICBwcm92aWRlcl90b2tlbj0iIiwKICAgICAgICAgICAgICAgIGN1cnJlbmN5PSJYVFIiLAogICAgICAgICAgICAgICAgcHJpY2VzPVtMYWJlbGVkUHJpY2UoItmG2YLYp9i3Iiwgc3RhcnMpXQogICAgICAgICAgICApCiAgICAgICAgICAgIAogICAgICAgICAgICBhd2FpdCBxdWVyeS5lZGl0X21lc3NhZ2VfdGV4dCgKICAgICAgICAgICAgICAgIGYi4q2QINix2KfYqNi3INin2YTYr9mB2Lkg2KzYp9mH2LIhXG5cbiIKICAgICAgICAgICAgICAgIGYi8J+SqyDYp9mE2YbYrNmI2YU6IHtzdGFyc31cbiIKICAgICAgICAgICAgICAgIGYi8J+SjiDYp9mE2YbZgtin2Lc6IHtwb2ludHN9XG5cbiIKICAgICAgICAgICAgICAgIGYi8J+UlyDYp9i22LrYtyDYudmE2Ykg2KfZhNix2KfYqNi3Olxue2ludm9pY2VfbGlua30iLAogICAgICAgICAgICAgICAgcmVwbHlfbWFya3VwPUlubGluZUtleWJvYXJkTWFya3VwKFsKICAgICAgICAgICAgICAgICAgICBbSW5saW5lS2V5Ym9hcmRCdXR0b24oIvCflJkg2LHYrNmI2Lkg2YTZhNio2KfZgtin2KoiLCBjYWxsYmFja19kYXRhPSdidXlfc3RhcnMnKV0sCiAgICAgICAgICAgICAgICAgICAgW0lubGluZUtleWJvYXJkQnV0dG9uKCLwn4+gINin2YTZgtin2KbZhdipINin2YTYsdim2YrYs9mK2KkiLCBjYWxsYmFja19kYXRhPSdiYWNrX3RvX21haW4nKV0KICAgICAgICAgICAgICAgIF0pCiAgICAgICAgICAgICkKICAgICAgICBleGNlcHQgRXhjZXB0aW9uIGFzIGU6CiAgICAgICAgICAgIGF3YWl0IHF1ZXJ5LmFuc3dlcihmIuKdjCDYrti32KM6IHtzdHIoZSl9Iiwgc2hvd19hbGVydD1UcnVlKQogICAgCiAgICBlbGlmIHF1ZXJ5LmRhdGEgPT0gJ3JlZmVycmFsJzoKICAgICAgICBib3RfdXNlcm5hbWUgPSAoYXdhaXQgY29udGV4dC5ib3QuZ2V0X21lKCkpLnVzZXJuYW1lCiAgICAgICAgcmVmX2xpbmsgPSBmImh0dHBzOi8vdC5tZS97Ym90X3VzZXJuYW1lfT9zdGFydD1yZWZ7dXNlcl9pZH0iCiAgICAgICAgcmVmZXJyYWxfcG9pbnRzID0gZ2V0X3NldHRpbmcoJ3JlZmVycmFsX3BvaW50cycpCiAgICAgICAgCiAgICAgICAgYXdhaXQgcXVlcnkuZWRpdF9tZXNzYWdlX3RleHQoCiAgICAgICAgICAgIGYi8J+RpSDYsdin2KjYtyDYp9mE2K/YudmI2Kkg2KfZhNiu2KfYtSDYqNmDOlxuXG4iCiAgICAgICAgICAgIGYiYHtyZWZfbGlua31gXG5cbiIKICAgICAgICAgICAgZiLwn46BINin2K3YtdmEINi52YTZiSB7cmVmZXJyYWxfcG9pbnRzfSDZhtmC2LfYqSDYudmGINmD2YQg2LXYr9mK2YIg2YrYtNiq2LHZgyEiLAogICAgICAgICAgICBwYXJzZV9tb2RlPSdNYXJrZG93bicsCiAgICAgICAgICAgIHJlcGx5X21hcmt1cD1JbmxpbmVLZXlib2FyZE1hcmt1cChbW0lubGluZUtleWJvYXJkQnV0dG9uKCLwn5SZINix2KzZiNi5IiwgY2FsbGJhY2tfZGF0YT0nYmFja190b19tYWluJyldXSkKICAgICAgICApCiAgICAKICAgIGVsaWYgcXVlcnkuZGF0YSA9PSAnYWRtaW5fcGFuZWwnOgogICAgICAgIGlmIHVzZXJfaWQgIT0gQURNSU5fSUQ6CiAgICAgICAgICAgIGF3YWl0IHF1ZXJ5LmFuc3dlcigi4p2MINi62YrYsSDZhdi12LHYrSDZhNmDISIsIHNob3dfYWxlcnQ9VHJ1ZSkKICAgICAgICAgICAgcmV0dXJuCiAgICAgICAgCiAgICAgICAgYXdhaXQgcXVlcnkuZWRpdF9tZXNzYWdlX3RleHQoCiAgICAgICAgICAgICLwn46b77iPINmE2YjYrdipINin2YTYqtit2YPZhSIsCiAgICAgICAgICAgIHJlcGx5X21hcmt1cD1hZG1pbl9rZXlib2FyZCgpCiAgICAgICAgKQogICAgCiAgICBlbGlmIHF1ZXJ5LmRhdGEgPT0gJ2FkbWluX3N0YXRzJzoKICAgICAgICBpZiB1c2VyX2lkICE9IEFETUlOX0lEOgogICAgICAgICAgICBhd2FpdCBxdWVyeS5hbnN3ZXIoIuKdjCDYutmK2LEg2YXYtdix2K0g2YTZgyEiLCBzaG93X2FsZXJ0PVRydWUpCiAgICAgICAgICAgIHJldHVybgogICAgICAgIAogICAgICAgIGNvbm4gPSBzcWxpdGUzLmNvbm5lY3QoJ3BvaW50c19ib3QuZGInKQogICAgICAgIGMgPSBjb25uLmN1cnNvcigpCiAgICAgICAgYy5leGVjdXRlKCdTRUxFQ1QgQ09VTlQoKikgRlJPTSB1c2VycycpCiAgICAgICAgdG90YWxfdXNlcnMgPSBjLmZldGNob25lKClbMF0KICAgICAgICBjLmV4ZWN1dGUoJ1NFTEVDVCBTVU0ocG9pbnRzKSBGUk9NIHVzZXJzJykKICAgICAgICB0b3RhbF9wb2ludHMgPSBjLmZldGNob25lKClbMF0gb3IgMAogICAgICAgIGMuZXhlY3V0ZSgnU0VMRUNUIENPVU5UKCopIEZST00gcHJvZHVjdHMnKQogICAgICAgIHRvdGFsX3Byb2R1Y3RzID0gYy5mZXRjaG9uZSgpWzBdCiAgICAgICAgYy5leGVjdXRlKCdTRUxFQ1QgQ09VTlQoKikgRlJPTSBjaGFubmVscycpCiAgICAgICAgdG90YWxfY2hhbm5lbHMgPSBjLmZldGNob25lKClbMF0KICAgICAgICBjLmV4ZWN1dGUoJ1NFTEVDVCBDT1VOVCgqKSBGUk9NIGdpZnRfY29kZXMnKQogICAgICAgIHRvdGFsX2NvZGVzID0gYy5mZXRjaG9uZSgpWzBdCiAgICAgICAgY29ubi5jbG9zZSgpCiAgICAgICAgCiAgICAgICAgYm90X3N0YXR1cyA9IGdldF9zZXR0aW5nKCdib3Rfc3RhdHVzJykKICAgICAgICBzdGF0dXNfZW1vamkgPSAi4pyFIiBpZiBib3Rfc3RhdHVzID09ICdhY3RpdmUnIGVsc2UgIvCflKciCiAgICAgICAgCiAgICAgICAgYXdhaXQgcXVlcnkuZWRpdF9tZXNzYWdlX3RleHQoCiAgICAgICAgICAgIGYi8J+TiiDYpdit2LXYp9im2YrYp9iqINin2YTYqNmI2Ko6XG5cbiIKICAgICAgICAgICAgZiJ7c3RhdHVzX2Vtb2ppfSDYp9mE2K3Yp9mE2Kk6IHsn2YbYtNi3JyBpZiBib3Rfc3RhdHVzID09ICdhY3RpdmUnIGVsc2UgJ9i12YrYp9mG2KknfVxuIgogICAgICAgICAgICBmIvCfkaUg2LnYr9ivINin2YTZhdiz2KrYrtiv2YXZitmGOiB7dG90YWxfdXNlcnN9XG4iCiAgICAgICAgICAgIGYi8J+SjiDYpdis2YXYp9mE2Yog2KfZhNmG2YLYp9i3OiB7dG90YWxfcG9pbnRzfVxuIgogICAgICAgICAgICBmIvCfm5Ig2LnYr9ivINin2YTZhdmG2KrYrNin2Ko6IHt0b3RhbF9wcm9kdWN0c31cbiIKICAgICAgICAgICAgZiLwn5O6INi52K/YryDYp9mE2YLZhtmI2KfYqjoge3RvdGFsX2NoYW5uZWxzfVxuIgogICAgICAgICAgICBmIvCfjqsg2KPZg9mI2KfYryDYp9mE2YfYr9in2YrYpzoge3RvdGFsX2NvZGVzfSIsCiAgICAgICAgICAgIHJlcGx5X21hcmt1cD1JbmxpbmVLZXlib2FyZE1hcmt1cChbW0lubGluZUtleWJvYXJkQnV0dG9uKCLwn5SZINix2KzZiNi5IiwgY2FsbGJhY2tfZGF0YT0nYWRtaW5fcGFuZWwnKV1dKQogICAgICAgICkKICAgIAogICAgZWxpZiBxdWVyeS5kYXRhID09ICdhZG1pbl9zZXR0aW5ncyc6CiAgICAgICAgaWYgdXNlcl9pZCAhPSBBRE1JTl9JRDoKICAgICAgICAgICAgYXdhaXQgcXVlcnkuYW5zd2VyKCLinYwg2LrZitixINmF2LXYsditINmE2YMhIiwgc2hvd19hbGVydD1UcnVlKQogICAgICAgICAgICByZXR1cm4KICAgICAgICAKICAgICAgICBrZXlib2FyZCA9IFsKICAgICAgICAgICAgW0lubGluZUtleWJvYXJkQnV0dG9uKCLwn5OdINiq2LnYr9mK2YQg2LHYs9in2YTYqSDYp9mE2KrYsdit2YrYqCIsIGNhbGxiYWNrX2RhdGE9J2VkaXRfd2VsY29tZScpXSwKICAgICAgICAgICAgW0lubGluZUtleWJvYXJkQnV0dG9uKCLwn46BINmG2YLYp9i3INin2YTYpdit2KfZhNipIiwgY2FsbGJhY2tfZGF0YT0nZWRpdF9yZWZlcnJhbF9wb2ludHMnKV0sCiAgICAgICAgICAgIFtJbmxpbmVLZXlib2FyZEJ1dHRvbigi8J+StSDYsdiz2YjZhSDYp9mE2KrYrdmI2YrZhCIsIGNhbGxiYWNrX2RhdGE9J2VkaXRfdHJhbnNmZXJfZmVlJyldLAogICAgICAgICAgICBbSW5saW5lS2V5Ym9hcmRCdXR0b24oIvCfjoEg2KfZhNmH2K/ZitipINin2YTZitmI2YXZitipIiwgY2FsbGJhY2tfZGF0YT0nZWRpdF9kYWlseV9naWZ0JyldLAogICAgICAgICAgICBbSW5saW5lS2V5Ym9hcmRCdXR0b24oIuKtkCDZhtiz2KjYqSDYp9mE2YbYrNmI2YUiLCBjYWxsYmFja19kYXRhPSdlZGl0X3N0YXJzX3JhdGlvJyldLAogICAgICAgICAgICBbSW5saW5lS2V5Ym9hcmRCdXR0b24oIvCflJkg2LHYrNmI2LkiLCBjYWxsYmFja19kYXRhPSdhZG1pbl9wYW5lbCcpXQogICAgICAgIF0KICAgICAgICBhd2FpdCBxdWVyeS5lZGl0X21lc3NhZ2VfdGV4dCgKICAgICAgICAgICAgIuKame+4jyDYp9mE2KXYudiv2KfYr9in2KoiLAogICAgICAgICAgICByZXBseV9tYXJrdXA9SW5saW5lS2V5Ym9hcmRNYXJrdXAoa2V5Ym9hcmQpCiAgICAgICAgKQogICAgCiAgICBlbGlmIHF1ZXJ5LmRhdGEgPT0gJ2VkaXRfZGFpbHlfZ2lmdCc6CiAgICAgICAgaWYgdXNlcl9pZCAhPSBBRE1JTl9JRDoKICAgICAgICAgICAgYXdhaXQgcXVlcnkuYW5zd2VyKCLinYwg2LrZitixINmF2LXYsditINmE2YMhIiwgc2hvd19hbGVydD1UcnVlKQogICAgICAgICAgICByZXR1cm4KICAgICAgICAKICAgICAgICBtb2RlID0gZ2V0X3NldHRpbmcoJ2RhaWx5X2dpZnRfbW9kZScpCiAgICAgICAga2V5Ym9hcmQgPSBbCiAgICAgICAgICAgIFtJbmxpbmVLZXlib2FyZEJ1dHRvbihmInsn4pyFJyBpZiBtb2RlID09ICdmaXhlZCcgZWxzZSAn4qycJ30g2KvYp9io2KrYqSIsIGNhbGxiYWNrX2RhdGE9J2dpZnRfbW9kZV9maXhlZCcpXSwKICAgICAgICAgICAgW0lubGluZUtleWJvYXJkQnV0dG9uKGYieyfinIUnIGlmIG1vZGUgPT0gJ3JhbmRvbScgZWxzZSAn4qycJ30g2LnYtNmI2KfYptmK2KkiLCBjYWxsYmFja19kYXRhPSdnaWZ0X21vZGVfcmFuZG9tJyldLAogICAgICAgICAgICBbSW5saW5lS2V5Ym9hcmRCdXR0b24oIvCflJkg2LHYrNmI2LkiLCBjYWxsYmFja19kYXRhPSdhZG1pbl9zZXR0aW5ncycpXQogICAgICAgIF0KICAgICAgICAKICAgICAgICBpZiBtb2RlID09ICdmaXhlZCc6CiAgICAgICAgICAgIHBvaW50cyA9IGdldF9zZXR0aW5nKCdkYWlseV9naWZ0X3BvaW50cycpCiAgICAgICAgICAgIHRleHQgPSBmIvCfjoEg2KfZhNmH2K/ZitipINin2YTZitmI2YXZitipOiB7cG9pbnRzfSDZhtmC2LfYqSAo2KvYp9io2KrYqSkiCiAgICAgICAgZWxzZToKICAgICAgICAgICAgbWluX3AgPSBnZXRfc2V0dGluZygnZGFpbHlfZ2lmdF9taW4nKQogICAgICAgICAgICBtYXhfcCA9IGdldF9zZXR0aW5nKCdkYWlseV9naWZ0X21heCcpCiAgICAgICAgICAgIHRleHQgPSBmIvCfjoEg2KfZhNmH2K/ZitipINin2YTZitmI2YXZitipOiDZhdmGIHttaW5fcH0g2KXZhNmJIHttYXhfcH0g2YbZgti32KkgKNi52LTZiNin2KbZitipKSIKICAgICAgICAKICAgICAgICBhd2FpdCBxdWVyeS5lZGl0X21lc3NhZ2VfdGV4dCh0ZXh0LCByZXBseV9tYXJrdXA9SW5saW5lS2V5Ym9hcmRNYXJrdXAoa2V5Ym9hcmQpKQogICAgCiAgICBlbGlmIHF1ZXJ5LmRhdGEgPT0gJ2dpZnRfbW9kZV9maXhlZCc6CiAgICAgICAgaWYgdXNlcl9pZCAhPSBBRE1JTl9JRDoKICAgICAgICAgICAgcmV0dXJuCiAgICAgICAgc2V0X3NldHRpbmcoJ2RhaWx5X2dpZnRfbW9kZScsICdmaXhlZCcpCiAgICAgICAgY29udGV4dC51c2VyX2RhdGFbJ3N0YXRlJ10gPSAnZWRpdF9maXhlZF9naWZ0JwogICAgICAgIGF3YWl0IHF1ZXJ5LmVkaXRfbWVzc2FnZV90ZXh0KAogICAgICAgICAgICAi2KPYsdiz2YQg2LnYr9ivINin2YTZhtmC2KfYtyDZhNmE2YfYr9mK2Kkg2KfZhNmK2YjZhdmK2Kk6IiwKICAgICAgICAgICAgcmVwbHlfbWFya3VwPUlubGluZUtleWJvYXJkTWFya3VwKFtbSW5saW5lS2V5Ym9hcmRCdXR0b24oIuKdjCDYpdmE2LrYp9ihIiwgY2FsbGJhY2tfZGF0YT0nYWRtaW5fc2V0dGluZ3MnKV1dKQogICAgICAgICkKICAgIAogICAgZWxpZiBxdWVyeS5kYXRhID09ICdnaWZ0X21vZGVfcmFuZG9tJzoKICAgICAgICBpZiB1c2VyX2lkICE9IEFETUlOX0lEOgogICAgICAgICAgICByZXR1cm4KICAgICAgICBzZXRfc2V0dGluZygnZGFpbHlfZ2lmdF9tb2RlJywgJ3JhbmRvbScpCiAgICAgICAgY29udGV4dC51c2VyX2RhdGFbJ3N0YXRlJ10gPSAnZWRpdF9yYW5kb21fZ2lmdF9taW4nCiAgICAgICAgYXdhaXQgcXVlcnkuZWRpdF9tZXNzYWdlX3RleHQoCiAgICAgICAgICAgICLYo9ix2LPZhCDYp9mE2K3YryDYp9mE2KPYr9mG2Ykg2YTZhNmG2YLYp9i3OiIsCiAgICAgICAgICAgIHJlcGx5X21hcmt1cD1JbmxpbmVLZXlib2FyZE1hcmt1cChbW0lubGluZUtleWJvYXJkQnV0dG9uKCLinYwg2KXZhNi62KfYoSIsIGNhbGxiYWNrX2RhdGE9J2FkbWluX3NldHRpbmdzJyldXSkKICAgICAgICApCiAgICAKICAgIGVsaWYgcXVlcnkuZGF0YSA9PSAndG9nZ2xlX2JvdF9zdGF0dXMnOgogICAgICAgIGlmIHVzZXJfaWQgIT0gQURNSU5fSUQ6CiAgICAgICAgICAgIGF3YWl0IHF1ZXJ5LmFuc3dlcigi4p2MINi62YrYsSDZhdi12LHYrSDZhNmDISIsIHNob3dfYWxlcnQ9VHJ1ZSkKICAgICAgICAgICAgcmV0dXJuCiAgICAgICAgCiAgICAgICAgY3VycmVudF9zdGF0dXMgPSBnZXRfc2V0dGluZygnYm90X3N0YXR1cycpCiAgICAgICAgbmV3X3N0YXR1cyA9ICdtYWludGVuYW5jZScgaWYgY3VycmVudF9zdGF0dXMgPT0gJ2FjdGl2ZScgZWxzZSAnYWN0aXZlJwogICAgICAgIHNldF9zZXR0aW5nKCdib3Rfc3RhdHVzJywgbmV3X3N0YXR1cykKICAgICAgICAKICAgICAgICBzdGF0dXNfdGV4dCA9ICLwn5SnINmI2LbYuSDYp9mE2LXZitin2YbYqSIgaWYgbmV3X3N0YXR1cyA9PSAnbWFpbnRlbmFuY2UnIGVsc2UgIuKchSDYp9mE2KjZiNiqINmG2LTYtyIKICAgICAgICBzdGF0dXNfZW1vamkgPSAi8J+UpyIgaWYgbmV3X3N0YXR1cyA9PSAnbWFpbnRlbmFuY2UnIGVsc2UgIuKchSIKICAgICAgICAKICAgICAgICBhd2FpdCBxdWVyeS5hbnN3ZXIoZiLYqtmFINin2YTYqti62YrZitixINil2YTZiToge3N0YXR1c190ZXh0fSIsIHNob3dfYWxlcnQ9VHJ1ZSkKICAgICAgICBhd2FpdCBxdWVyeS5lZGl0X21lc3NhZ2VfdGV4dCgKICAgICAgICAgICAgZiLwn46b77iPINmE2YjYrdipINin2YTYqtit2YPZhVxuXG57c3RhdHVzX2Vtb2ppfSDYrdin2YTYqSDYp9mE2KjZiNiqOiB7c3RhdHVzX3RleHR9IiwKICAgICAgICAgICAgcmVwbHlfbWFya3VwPWFkbWluX2tleWJvYXJkKCkKICAgICAgICApCiAgICAKICAgIGVsaWYgcXVlcnkuZGF0YSA9PSAnYWRkX3Byb2R1Y3QnOgogICAgICAgIGlmIHVzZXJfaWQgIT0gQURNSU5fSUQ6CiAgICAgICAgICAgIGF3YWl0IHF1ZXJ5LmFuc3dlcigi4p2MINi62YrYsSDZhdi12LHYrSDZhNmDISIsIHNob3dfYWxlcnQ9VHJ1ZSkKICAgICAgICAgICAgcmV0dXJuCiAgICAgICAgCiAgICAgICAgY29udGV4dC51c2VyX2RhdGFbJ3N0YXRlJ10gPSAnYWRkX3Byb2R1Y3RfbmFtZScKICAgICAgICBhd2FpdCBxdWVyeS5lZGl0X21lc3NhZ2VfdGV4dCgKICAgICAgICAgICAgItij2LHYs9mEINin2LPZhSDYp9mE2YXZhtiq2Kw6IiwKICAgICAgICAgICAgcmVwbHlfbWFya3VwPUlubGluZUtleWJvYXJkTWFya3VwKFtbSW5saW5lS2V5Ym9hcmRCdXR0b24oIuKdjCDYpdmE2LrYp9ihIiwgY2FsbGJhY2tfZGF0YT0nYWRtaW5fcGFuZWwnKV1dKQogICAgICAgICkKICAgIAogICAgZWxpZiBxdWVyeS5kYXRhID09ICdkZWxldGVfcHJvZHVjdCc6CiAgICAgICAgaWYgdXNlcl9pZCAhPSBBRE1JTl9JRDoKICAgICAgICAgICAgYXdhaXQgcXVlcnkuYW5zd2VyKCLinYwg2LrZitixINmF2LXYsditINmE2YMhIiwgc2hvd19hbGVydD1UcnVlKQogICAgICAgICAgICByZXR1cm4KICAgICAgICAKICAgICAgICBwcm9kdWN0cyA9IGdldF9wcm9kdWN0cygpCiAgICAgICAgaWYgbm90IHByb2R1Y3RzOgogICAgICAgICAgICBhd2FpdCBxdWVyeS5hbnN3ZXIoItmE2Kcg2KrZiNis2K8g2YXZhtiq2KzYp9iqISIsIHNob3dfYWxlcnQ9VHJ1ZSkKICAgICAgICAgICAgcmV0dXJuCiAgICAgICAgCiAgICAgICAga2V5Ym9hcmQgPSBbXQogICAgICAgIGZvciBwcm9kdWN0IGluIHByb2R1Y3RzOgogICAgICAgICAgICBrZXlib2FyZC5hcHBlbmQoW0lubGluZUtleWJvYXJkQnV0dG9uKAogICAgICAgICAgICAgICAgZiLwn5eR77iPIHtwcm9kdWN0WzFdfSAtIHtwcm9kdWN0WzJdfSDZhtmC2LfYqSIsCiAgICAgICAgICAgICAgICBjYWxsYmFja19kYXRhPWYnZGVscF97cHJvZHVjdFswXX0nCiAgICAgICAgICAgICldKQogICAgICAgIGtleWJvYXJkLmFwcGVuZChbSW5saW5lS2V5Ym9hcmRCdXR0b24oIvCflJkg2LHYrNmI2LkiLCBjYWxsYmFja19kYXRhPSdhZG1pbl9wYW5lbCcpXSkKICAgICAgICAKICAgICAgICBhd2FpdCBxdWVyeS5lZGl0X21lc3NhZ2VfdGV4dCgKICAgICAgICAgICAgItin2K7YqtixINin2YTZhdmG2KrYrCDZhNmE2K3YsNmBOiIsCiAgICAgICAgICAgIHJlcGx5X21hcmt1cD1JbmxpbmVLZXlib2FyZE1hcmt1cChrZXlib2FyZCkKICAgICAgICApCiAgICAKICAgIGVsaWYgcXVlcnkuZGF0YS5zdGFydHN3aXRoKCdkZWxwXycpOgogICAgICAgIGlmIHVzZXJfaWQgIT0gQURNSU5fSUQ6CiAgICAgICAgICAgIHJldHVybgogICAgICAgIAogICAgICAgIHByb2R1Y3RfaWQgPSBpbnQocXVlcnkuZGF0YS5zcGxpdCgnXycpWzFdKQogICAgICAgIGRlbGV0ZV9wcm9kdWN0KHByb2R1Y3RfaWQpCiAgICAgICAgYXdhaXQgcXVlcnkuYW5zd2VyKCLinIUg2KrZhSDYrdiw2YEg2KfZhNmF2YbYqtisISIsIHNob3dfYWxlcnQ9VHJ1ZSkKICAgICAgICBhd2FpdCBxdWVyeS5lZGl0X21lc3NhZ2VfdGV4dCgi8J+Om++4jyDZhNmI2K3YqSDYp9mE2KrYrdmD2YUiLCByZXBseV9tYXJrdXA9YWRtaW5fa2V5Ym9hcmQoKSkKICAgIAogICAgZWxpZiBxdWVyeS5kYXRhID09ICdicm9hZGNhc3QnOgogICAgICAgIGlmIHVzZXJfaWQgIT0gQURNSU5fSUQ6CiAgICAgICAgICAgIGF3YWl0IHF1ZXJ5LmFuc3dlcigi4p2MINi62YrYsSDZhdi12LHYrSDZhNmDISIsIHNob3dfYWxlcnQ9VHJ1ZSkKICAgICAgICAgICAgcmV0dXJuCiAgICAgICAgCiAgICAgICAgY29udGV4dC51c2VyX2RhdGFbJ3N0YXRlJ10gPSAnYnJvYWRjYXN0JwogICAgICAgIGF3YWl0IHF1ZXJ5LmVkaXRfbWVzc2FnZV90ZXh0KAogICAgICAgICAgICAi8J+ToiDYo9ix2LPZhCDYp9mE2LHYs9in2YTYqSDZhNmE2KXYsNin2LnYqToiLAogICAgICAgICAgICByZXBseV9tYXJrdXA9SW5saW5lS2V5Ym9hcmRNYXJrdXAoW1tJbmxpbmVLZXlib2FyZEJ1dHRvbigi4p2MINil2YTYutin2KEiLCBjYWxsYmFja19kYXRhPSdhZG1pbl9wYW5lbCcpXV0pCiAgICAgICAgKQogICAgCiAgICBlbGlmIHF1ZXJ5LmRhdGEgPT0gJ21hbmFnZV9jaGFubmVscyc6CiAgICAgICAgaWYgdXNlcl9pZCAhPSBBRE1JTl9JRDoKICAgICAgICAgICAgYXdhaXQgcXVlcnkuYW5zd2VyKCLinYwg2LrZitixINmF2LXYsditINmE2YMhIiwgc2hvd19hbGVydD1UcnVlKQogICAgICAgICAgICByZXR1cm4KICAgICAgICAKICAgICAgICBrZXlib2FyZCA9IFsKICAgICAgICAgICAgW0lubGluZUtleWJvYXJkQnV0dG9uKCLinpUg2KXYttin2YHYqSDZgtmG2KfYqSIsIGNhbGxiYWNrX2RhdGE9J2FkZF9jaGFubmVsJyldLAogICAgICAgICAgICBbSW5saW5lS2V5Ym9hcmRCdXR0b24oIuKeliDYrdiw2YEg2YLZhtin2KkiLCBjYWxsYmFja19kYXRhPSdyZW1vdmVfY2hhbm5lbCcpXSwKICAgICAgICAgICAgW0lubGluZUtleWJvYXJkQnV0dG9uKCLwn5OLINi52LHYtiDYp9mE2YLZhtmI2KfYqiIsIGNhbGxiYWNrX2RhdGE9J2xpc3RfY2hhbm5lbHMnKV0sCiAgICAgICAgICAgIFtJbmxpbmVLZXlib2FyZEJ1dHRvbigi8J+UmSDYsdis2YjYuSIsIGNhbGxiYWNrX2RhdGE9J2FkbWluX3BhbmVsJyldCiAgICAgICAgXQogICAgICAgIGF3YWl0IHF1ZXJ5LmVkaXRfbWVzc2FnZV90ZXh0KAogICAgICAgICAgICAi8J+TuiDYpdiv2KfYsdipINin2YTZgtmG2YjYp9iqIiwKICAgICAgICAgICAgcmVwbHlfbWFya3VwPUlubGluZUtleWJvYXJkTWFya3VwKGtleWJvYXJkKQogICAgICAgICkKICAgIAogICAgZWxpZiBxdWVyeS5kYXRhID09ICdhZGRfY2hhbm5lbCc6CiAgICAgICAgaWYgdXNlcl9pZCAhPSBBRE1JTl9JRDoKICAgICAgICAgICAgcmV0dXJuCiAgICAgICAgCiAgICAgICAgY29udGV4dC51c2VyX2RhdGFbJ3N0YXRlJ10gPSAnYWRkX2NoYW5uZWwnCiAgICAgICAgYXdhaXQgcXVlcnkuZWRpdF9tZXNzYWdlX3RleHQoCiAgICAgICAgICAgICLYo9ix2LPZhCDZhdi52LHZgSDYp9mE2YLZhtin2KkgKNmF2KvYp9mEOiBAY2hhbm5lbF9uYW1lKToiLAogICAgICAgICAgICByZXBseV9tYXJrdXA9SW5saW5lS2V5Ym9hcmRNYXJrdXAoW1tJbmxpbmVLZXlib2FyZEJ1dHRvbigi4p2MINil2YTYutin2KEiLCBjYWxsYmFja19kYXRhPSdtYW5hZ2VfY2hhbm5lbHMnKV1dKQogICAgICAgICkKICAgIAogICAgZWxpZiBxdWVyeS5kYXRhID09ICdsaXN0X2NoYW5uZWxzJzoKICAgICAgICBpZiB1c2VyX2lkICE9IEFETUlOX0lEOgogICAgICAgICAgICByZXR1cm4KICAgICAgICAKICAgICAgICBjaGFubmVscyA9IGdldF9jaGFubmVscygpCiAgICAgICAgaWYgbm90IGNoYW5uZWxzOgogICAgICAgICAgICBhd2FpdCBxdWVyeS5hbnN3ZXIoItmE2Kcg2KrZiNis2K8g2YLZhtmI2KfYqiEiLCBzaG93X2FsZXJ0PVRydWUpCiAgICAgICAgICAgIHJldHVybgogICAgICAgIAogICAgICAgIHRleHQgPSAi8J+TiyDYp9mE2YLZhtmI2KfYqiDYp9mE2YXYs9is2YTYqTpcblxuIgogICAgICAgIGZvciBjaGFubmVsIGluIGNoYW5uZWxzOgogICAgICAgICAgICB0ZXh0ICs9IGYi4oCiIEB7Y2hhbm5lbFsxXX1cbiIKICAgICAgICAKICAgICAgICBhd2FpdCBxdWVyeS5lZGl0X21lc3NhZ2VfdGV4dCgKICAgICAgICAgICAgdGV4dCwKICAgICAgICAgICAgcmVwbHlfbWFya3VwPUlubGluZUtleWJvYXJkTWFya3VwKFtbSW5saW5lS2V5Ym9hcmRCdXR0b24oIvCflJkg2LHYrNmI2LkiLCBjYWxsYmFja19kYXRhPSdtYW5hZ2VfY2hhbm5lbHMnKV1dKQogICAgICAgICkKICAgIAogICAgZWxpZiBxdWVyeS5kYXRhID09ICdyZW1vdmVfY2hhbm5lbCc6CiAgICAgICAgaWYgdXNlcl9pZCAhPSBBRE1JTl9JRDoKICAgICAgICAgICAgcmV0dXJuCiAgICAgICAgCiAgICAgICAgY2hhbm5lbHMgPSBnZXRfY2hhbm5lbHMoKQogICAgICAgIGlmIG5vdCBjaGFubmVsczoKICAgICAgICAgICAgYXdhaXQgcXVlcnkuYW5zd2VyKCLZhNinINiq2YjYrNivINmC2YbZiNin2KohIiwgc2hvd19hbGVydD1UcnVlKQogICAgICAgICAgICByZXR1cm4KICAgICAgICAKICAgICAgICBrZXlib2FyZCA9IFtdCiAgICAgICAgZm9yIGNoYW5uZWwgaW4gY2hhbm5lbHM6CiAgICAgICAgICAgIGtleWJvYXJkLmFwcGVuZChbSW5saW5lS2V5Ym9hcmRCdXR0b24oCiAgICAgICAgICAgICAgICBmIvCfl5HvuI8gQHtjaGFubmVsWzFdfSIsCiAgICAgICAgICAgICAgICBjYWxsYmFja19kYXRhPWYnZGVsY2hfe2NoYW5uZWxbMF19JwogICAgICAgICAgICApXSkKICAgICAgICBrZXlib2FyZC5hcHBlbmQoW0lubGluZUtleWJvYXJkQnV0dG9uKCLwn5SZINix2KzZiNi5IiwgY2FsbGJhY2tfZGF0YT0nbWFuYWdlX2NoYW5uZWxzJyldKQogICAgICAgIAogICAgICAgIGF3YWl0IHF1ZXJ5LmVkaXRfbWVzc2FnZV90ZXh0KAogICAgICAgICAgICAi2KfYrtiq2LEg2KfZhNmC2YbYp9ipINmE2YTYrdiw2YE6IiwKICAgICAgICAgICAgcmVwbHlfbWFya3VwPUlubGluZUtleWJvYXJkTWFya3VwKGtleWJvYXJkKQogICAgICAgICkKICAgIAogICAgZWxpZiBxdWVyeS5kYXRhLnN0YXJ0c3dpdGgoJ2RlbGNoXycpOgogICAgICAgIGlmIHVzZXJfaWQgIT0gQURNSU5fSUQ6CiAgICAgICAgICAgIHJldHVybgogICAgICAgIAogICAgICAgIGNoYW5uZWxfaWQgPSBxdWVyeS5kYXRhLnNwbGl0KCdfJywgMSlbMV0KICAgICAgICByZW1vdmVfY2hhbm5lbChjaGFubmVsX2lkKQogICAgICAgIGF3YWl0IHF1ZXJ5LmFuc3dlcigi4pyFINiq2YUg2K3YsNmBINin2YTZgtmG2KfYqSEiLCBzaG93X2FsZXJ0PVRydWUpCiAgICAgICAgCiAgICAgICAga2V5Ym9hcmQgPSBbCiAgICAgICAgICAgIFtJbmxpbmVLZXlib2FyZEJ1dHRvbigi4p6VINil2LbYp9mB2Kkg2YLZhtin2KkiLCBjYWxsYmFja19kYXRhPSdhZGRfY2hhbm5lbCcpXSwKICAgICAgICAgICAgW0lubGluZUtleWJvYXJkQnV0dG9uKCLinpYg2K3YsNmBINmC2YbYp9ipIiwgY2FsbGJhY2tfZGF0YT0ncmVtb3ZlX2NoYW5uZWwnKV0sCiAgICAgICAgICAgIFtJbmxpbmVLZXlib2FyZEJ1dHRvbigi8J+TiyDYudix2LYg2KfZhNmC2YbZiNin2KoiLCBjYWxsYmFja19kYXRhPSdsaXN0X2NoYW5uZWxzJyldLAogICAgICAgICAgICBbSW5saW5lS2V5Ym9hcmRCdXR0b24oIvCflJkg2LHYrNmI2LkiLCBjYWxsYmFja19kYXRhPSdhZG1pbl9wYW5lbCcpXQogICAgICAgIF0KICAgICAgICBhd2FpdCBxdWVyeS5lZGl0X21lc3NhZ2VfdGV4dCgKICAgICAgICAgICAgIvCfk7og2KXYr9in2LHYqSDYp9mE2YLZhtmI2KfYqiIsCiAgICAgICAgICAgIHJlcGx5X21hcmt1cD1JbmxpbmVLZXlib2FyZE1hcmt1cChrZXlib2FyZCkKICAgICAgICApCiAgICAKICAgIGVsaWYgcXVlcnkuZGF0YSA9PSAnY3JlYXRlX2dpZnRfY29kZSc6CiAgICAgICAgaWYgdXNlcl9pZCAhPSBBRE1JTl9JRDoKICAgICAgICAgICAgYXdhaXQgcXVlcnkuYW5zd2VyKCLinYwg2LrZitixINmF2LXYsditINmE2YMhIiwgc2hvd19hbGVydD1UcnVlKQogICAgICAgICAgICByZXR1cm4KICAgICAgICAKICAgICAgICBjb250ZXh0LnVzZXJfZGF0YVsnc3RhdGUnXSA9ICdnaWZ0X2NvZGVfcG9pbnRzJwogICAgICAgIGF3YWl0IHF1ZXJ5LmVkaXRfbWVzc2FnZV90ZXh0KAogICAgICAgICAgICAi2KPYsdiz2YQg2LnYr9ivINin2YTZhtmC2KfYtyDZgdmKINin2YTZg9mI2K86IiwKICAgICAgICAgICAgcmVwbHlfbWFya3VwPUlubGluZUtleWJvYXJkTWFya3VwKFtbSW5saW5lS2V5Ym9hcmRCdXR0b24oIuKdjCDYpdmE2LrYp9ihIiwgY2FsbGJhY2tfZGF0YT0nYWRtaW5fcGFuZWwnKV1dKQogICAgICAgICkKICAgIAogICAgZWxpZiBxdWVyeS5kYXRhID09ICdlZGl0X3dlbGNvbWUnOgogICAgICAgIGlmIHVzZXJfaWQgIT0gQURNSU5fSUQ6CiAgICAgICAgICAgIHJldHVybgogICAgICAgIAogICAgICAgIGNvbnRleHQudXNlcl9kYXRhWydzdGF0ZSddID0gJ2VkaXRfd2VsY29tZScKICAgICAgICBhd2FpdCBxdWVyeS5lZGl0X21lc3NhZ2VfdGV4dCgKICAgICAgICAgICAgItij2LHYs9mEINix2LPYp9mE2Kkg2KfZhNiq2LHYrdmK2Kgg2KfZhNis2K/Zitiv2Kk6IiwKICAgICAgICAgICAgcmVwbHlfbWFya3VwPUlubGluZUtleWJvYXJkTWFya3VwKFtbSW5saW5lS2V5Ym9hcmRCdXR0b24oIuKdjCDYpdmE2LrYp9ihIiwgY2FsbGJhY2tfZGF0YT0nYWRtaW5fc2V0dGluZ3MnKV1dKQogICAgICAgICkKICAgIAogICAgZWxpZiBxdWVyeS5kYXRhID09ICdlZGl0X3JlZmVycmFsX3BvaW50cyc6CiAgICAgICAgaWYgdXNlcl9pZCAhPSBBRE1JTl9JRDoKICAgICAgICAgICAgcmV0dXJuCiAgICAgICAgCiAgICAgICAgY29udGV4dC51c2VyX2RhdGFbJ3N0YXRlJ10gPSAnZWRpdF9yZWZlcnJhbF9wb2ludHMnCiAgICAgICAgY3VycmVudCA9IGdldF9zZXR0aW5nKCdyZWZlcnJhbF9wb2ludHMnKQogICAgICAgIGF3YWl0IHF1ZXJ5LmVkaXRfbWVzc2FnZV90ZXh0KAogICAgICAgICAgICBmItin2YTZhtmC2KfYtyDYp9mE2K3Yp9mE2YrYqToge2N1cnJlbnR9XG5cbtij2LHYs9mEINi52K/YryDYp9mE2YbZgtin2Lcg2KfZhNis2K/ZitivOiIsCiAgICAgICAgICAgIHJlcGx5X21hcmt1cD1JbmxpbmVLZXlib2FyZE1hcmt1cChbW0lubGluZUtleWJvYXJkQnV0dG9uKCLinYwg2KXZhNi62KfYoSIsIGNhbGxiYWNrX2RhdGE9J2FkbWluX3NldHRpbmdzJyldXSkKICAgICAgICApCiAgICAKICAgIGVsaWYgcXVlcnkuZGF0YSA9PSAnZWRpdF90cmFuc2Zlcl9mZWUnOgogICAgICAgIGlmIHVzZXJfaWQgIT0gQURNSU5fSUQ6CiAgICAgICAgICAgIHJldHVybgogICAgICAgIAogICAgICAgIGNvbnRleHQudXNlcl9kYXRhWydzdGF0ZSddID0gJ2VkaXRfdHJhbnNmZXJfZmVlJwogICAgICAgIGN1cnJlbnQgPSBnZXRfc2V0dGluZygndHJhbnNmZXJfZmVlJykKICAgICAgICBhd2FpdCBxdWVyeS5lZGl0X21lc3NhZ2VfdGV4dCgKICAgICAgICAgICAgZiLYp9mE2LHYs9mI2YUg2KfZhNit2KfZhNmK2Kk6IHtjdXJyZW50fVxuXG7Yo9ix2LPZhCDYsdiz2YjZhSDYp9mE2KrYrdmI2YrZhCDYp9mE2KzYr9mK2K/YqToiLAogICAgICAgICAgICByZXBseV9tYXJrdXA9SW5saW5lS2V5Ym9hcmRNYXJrdXAoW1tJbmxpbmVLZXlib2FyZEJ1dHRvbigi4p2MINil2YTYutin2KEiLCBjYWxsYmFja19kYXRhPSdhZG1pbl9zZXR0aW5ncycpXV0pCiAgICAgICAgKQogICAgCiAgICBlbGlmIHF1ZXJ5LmRhdGEgPT0gJ2VkaXRfc3RhcnNfcmF0aW8nOgogICAgICAgIGlmIHVzZXJfaWQgIT0gQURNSU5fSUQ6CiAgICAgICAgICAgIHJldHVybgogICAgICAgIAogICAgICAgIGNvbnRleHQudXNlcl9kYXRhWydzdGF0ZSddID0gJ2VkaXRfc3RhcnNfcmF0aW8nCiAgICAgICAgY3VycmVudCA9IGdldF9zZXR0aW5nKCdzdGFyc19yYXRpbycpCiAgICAgICAgYXdhaXQgcXVlcnkuZWRpdF9tZXNzYWdlX3RleHQoCiAgICAgICAgICAgIGYi2KfZhNmG2LPYqNipINin2YTYrdin2YTZitipOiDZg9mEINmG2KzZhdipID0ge2N1cnJlbnR9INmG2YLYt9ipXG5cbtij2LHYs9mEINin2YTZhtiz2KjYqSDYp9mE2KzYr9mK2K/YqToiLAogICAgICAgICAgICByZXBseV9tYXJrdXA9SW5saW5lS2V5Ym9hcmRNYXJrdXAoW1tJbmxpbmVLZXlib2FyZEJ1dHRvbigi4p2MINil2YTYutin2KEiLCBjYWxsYmFja19kYXRhPSdhZG1pbl9zZXR0aW5ncycpXV0pCiAgICAgICAgKQogICAgCiAgICBlbGlmIHF1ZXJ5LmRhdGEgPT0gJ2NoZWNrX3N1YnNjcmlwdGlvbic6CiAgICAgICAgaWYgYXdhaXQgY2hlY2tfc3Vic2NyaXB0aW9uKHVzZXJfaWQsIGNvbnRleHQpOgogICAgICAgICAgICB3ZWxjb21lX21lc3NhZ2UgPSBnZXRfc2V0dGluZygnd2VsY29tZV9tZXNzYWdlJykKICAgICAgICAgICAgYXdhaXQgcXVlcnkuZWRpdF9tZXNzYWdlX3RleHQod2VsY29tZV9tZXNzYWdlLCByZXBseV9tYXJrdXA9bWFpbl9rZXlib2FyZCh1c2VyX2lkKSkKICAgICAgICBlbHNlOgogICAgICAgICAgICBhd2FpdCBxdWVyeS5hbnN3ZXIoIuKaoO+4jyDZhNmFINiq2LTYqtix2YMg2YHZiiDYrNmF2YrYuSDYp9mE2YLZhtmI2KfYqiDYqNi52K8hIiwgc2hvd19hbGVydD1UcnVlKQogICAgCiAgICBlbGlmIHF1ZXJ5LmRhdGEgPT0gJ2JhY2tfdG9fbWFpbic6CiAgICAgICAgY29udGV4dC51c2VyX2RhdGEuY2xlYXIoKQogICAgICAgIHdlbGNvbWVfbWVzc2FnZSA9IGdldF9zZXR0aW5nKCd3ZWxjb21lX21lc3NhZ2UnKQogICAgICAgIGF3YWl0IHF1ZXJ5LmVkaXRfbWVzc2FnZV90ZXh0KHdlbGNvbWVfbWVzc2FnZSwgcmVwbHlfbWFya3VwPW1haW5fa2V5Ym9hcmQodXNlcl9pZCkpCiAgICAKICAgIGVsaWYgcXVlcnkuZGF0YSA9PSAnY2FuY2VsJzoKICAgICAgICBjb250ZXh0LnVzZXJfZGF0YS5jbGVhcigpCiAgICAgICAgYXdhaXQgcXVlcnkuZWRpdF9tZXNzYWdlX3RleHQoCiAgICAgICAgICAgICLinYwg2KrZhSDYp9mE2KXZhNi62KfYoSIsCiAgICAgICAgICAgIHJlcGx5X21hcmt1cD1JbmxpbmVLZXlib2FyZE1hcmt1cChbW0lubGluZUtleWJvYXJkQnV0dG9uKCLwn5SZINix2KzZiNi5IiwgY2FsbGJhY2tfZGF0YT0nYmFja190b19tYWluJyldXSkKICAgICAgICApCiAgICAgICAgcmV0dXJuIENvbnZlcnNhdGlvbkhhbmRsZXIuRU5ECiAgICAKICAgIGVsaWYgcXVlcnkuZGF0YS5zdGFydHN3aXRoKCdyZWZ1bmRfJyk6CiAgICAgICAgaWYgdXNlcl9pZCAhPSBBRE1JTl9JRDoKICAgICAgICAgICAgYXdhaXQgcXVlcnkuYW5zd2VyKCLinYwg2LrZitixINmF2LXYsditINmE2YMhIiwgc2hvd19hbGVydD1UcnVlKQogICAgICAgICAgICByZXR1cm4KICAgICAgICAKICAgICAgICByZWZ1bmRfaWQgPSBpbnQocXVlcnkuZGF0YS5zcGxpdCgnXycpWzFdKQogICAgICAgIAogICAgICAgIGNvbm4gPSBzcWxpdGUzLmNvbm5lY3QoJ3BvaW50c19ib3QuZGInKQogICAgICAgIGMgPSBjb25uLmN1cnNvcigpCiAgICAgICAgYy5leGVjdXRlKCdTRUxFQ1QgdXNlcl9pZCwgY2hhcmdlX2lkIEZST00gcmVmdW5kX3JlcXVlc3RzIFdIRVJFIGlkID0gPycsIChyZWZ1bmRfaWQsKSkKICAgICAgICByZWZ1bmRfZGF0YSA9IGMuZmV0Y2hvbmUoKQogICAgICAgIGNvbm4uY2xvc2UoKQogICAgICAgIAogICAgICAgIGlmIG5vdCByZWZ1bmRfZGF0YToKICAgICAgICAgICAgYXdhaXQgcXVlcnkuYW5zd2VyKCLinYwg2LfZhNioINin2YTYp9iz2KrYsdiv2KfYryDYutmK2LEg2YXZiNis2YjYryEiLCBzaG93X2FsZXJ0PVRydWUpCiAgICAgICAgICAgIHJldHVybgogICAgICAgIAogICAgICAgIHRhcmdldF91c2VyX2lkID0gcmVmdW5kX2RhdGFbMF0KICAgICAgICBjaGFyZ2VfaWQgPSByZWZ1bmRfZGF0YVsxXQogICAgICAgIAogICAgICAgIGF3YWl0IHF1ZXJ5LmFuc3dlcigi4o+zINis2KfYsdmKINin2LPYqtix2K/Yp9ivINin2YTZhtis2YjZhS4uLiIsIHNob3dfYWxlcnQ9VHJ1ZSkKICAgICAgICAKICAgICAgICB0cnk6CiAgICAgICAgICAgIGF3YWl0IGNvbnRleHQuYm90LnJlZnVuZF9zdGFyX3BheW1lbnQoCiAgICAgICAgICAgICAgICB1c2VyX2lkPXRhcmdldF91c2VyX2lkLAogICAgICAgICAgICAgICAgdGVsZWdyYW1fcGF5bWVudF9jaGFyZ2VfaWQ9Y2hhcmdlX2lkCiAgICAgICAgICAgICkKICAgICAgICAgICAgCiAgICAgICAgICAgIGF3YWl0IHF1ZXJ5LmVkaXRfbWVzc2FnZV90ZXh0KAogICAgICAgICAgICAgICAgZiJ7cXVlcnkubWVzc2FnZS50ZXh0fVxuXG4iCiAgICAgICAgICAgICAgICBmIuKchSDYqtmFINin2LPYqtix2K/Yp9ivINin2YTZhtis2YjZhSDYqNmG2KzYp9itIVxuIgogICAgICAgICAgICAgICAgZiLij7Ag2KfZhNmI2YLYqjoge2RhdGV0aW1lLm5vdygpLnN0cmZ0aW1lKCclWS0lbS0lZCAlSDolTTolUycpfSIKICAgICAgICAgICAgKQogICAgICAgICAgICAKICAgICAgICAgICAgdHJ5OgogICAgICAgICAgICAgICAgYXdhaXQgY29udGV4dC5ib3Quc2VuZF9tZXNzYWdlKAogICAgICAgICAgICAgICAgICAgIHRhcmdldF91c2VyX2lkLAogICAgICAgICAgICAgICAgICAgIGYi8J+SsCDYqtmFINil2LHYrNin2Lkg2KfZhNmG2KzZiNmFINil2YTZiSDYrdiz2KfYqNmDIVxuXG4iCiAgICAgICAgICAgICAgICAgICAgZiLwn4aUINix2YLZhSDYp9mE2YXYudin2YXZhNipOlxuYHtjaGFyZ2VfaWR9YFxuXG4iCiAgICAgICAgICAgICAgICAgICAgZiLYtNmD2LHYp9mLINmE2KrYudin2YXZhNmDINmF2LnZhtinISDwn5KrIiwKICAgICAgICAgICAgICAgICAgICBwYXJzZV9tb2RlPSdNYXJrZG93bicKICAgICAgICAgICAgICAgICkKICAgICAgICAgICAgZXhjZXB0OgogICAgICAgICAgICAgICAgcGFzcwogICAgICAgICAgICAgICAgCiAgICAgICAgZXhjZXB0IEV4Y2VwdGlvbiBhcyBlOgogICAgICAgICAgICBlcnJvcl9tc2cgPSBzdHIoZSkKICAgICAgICAgICAgaWYgIkNIQVJHRV9BTFJFQURZX1JFRlVOREVEIiBpbiBlcnJvcl9tc2c6CiAgICAgICAgICAgICAgICBhd2FpdCBxdWVyeS5hbnN3ZXIoIuKaoO+4jyDYqtmFINin2LPYqtix2K/Yp9ivINmH2LDZhyDYp9mE2YXYudin2YXZhNipINmF2LPYqNmC2KfZiyEiLCBzaG93X2FsZXJ0PVRydWUpCiAgICAgICAgICAgIGVsc2U6CiAgICAgICAgICAgICAgICBhd2FpdCBxdWVyeS5hbnN3ZXIoZiLinYwg2YHYtNmEINin2YTYp9iz2KrYsdiv2KfYrzoge2Vycm9yX21zZ30iLCBzaG93X2FsZXJ0PVRydWUpCgojINmF2LnYp9mE2KzYqSDYp9mE2LHYs9in2KbZhCDYp9mE2YbYtdmK2KkKYXN5bmMgZGVmIG1lc3NhZ2VfaGFuZGxlcih1cGRhdGU6IFVwZGF0ZSwgY29udGV4dDogQ29udGV4dFR5cGVzLkRFRkFVTFRfVFlQRSk6CiAgICB0ZXh0ID0gdXBkYXRlLm1lc3NhZ2UudGV4dCBpZiB1cGRhdGUubWVzc2FnZS50ZXh0IGVsc2UgTm9uZQogICAgdXNlcl9pZCA9IHVwZGF0ZS5lZmZlY3RpdmVfdXNlci5pZAogICAgc3RhdGUgPSBjb250ZXh0LnVzZXJfZGF0YS5nZXQoJ3N0YXRlJykKICAgIAogICAgaWYgc3RhdGUgPT0gJ3RyYW5zZmVyX2Ftb3VudCc6CiAgICAgICAgaWYgbm90IHRleHQgb3Igbm90IHRleHQuaXNkaWdpdCgpOgogICAgICAgICAgICBhd2FpdCB1cGRhdGUubWVzc2FnZS5yZXBseV90ZXh0KCLinYwg2KPYsdiz2YQg2LHZgtmF2KfZiyDYtdit2YrYrdin2YshIikKICAgICAgICAgICAgcmV0dXJuIFdBSVRJTkdfVFJBTlNGRVJfQU1PVU5UCiAgICAgICAgCiAgICAgICAgYW1vdW50ID0gaW50KHRleHQpCiAgICAgICAgaWYgYW1vdW50IDwgMToKICAgICAgICAgICAgYXdhaXQgdXBkYXRlLm1lc3NhZ2UucmVwbHlfdGV4dCgi4p2MINij2YLZhCDZhdio2YTYuiDZhNmE2KrYrdmI2YrZhCDZh9mIIDEg2YbZgti32KkhIikKICAgICAgICAgICAgcmV0dXJuIFdBSVRJTkdfVFJBTlNGRVJfQU1PVU5UCiAgICAgICAgCiAgICAgICAgdXNlciA9IGdldF91c2VyKHVzZXJfaWQpCiAgICAgICAgdHJhbnNmZXJfZmVlID0gaW50KGdldF9zZXR0aW5nKCd0cmFuc2Zlcl9mZWUnKSkKICAgICAgICB0b3RhbF9uZWVkZWQgPSBhbW91bnQgKyB0cmFuc2Zlcl9mZWUKICAgICAgICAKICAgICAgICBpZiB1c2VyWzJdIDwgdG90YWxfbmVlZGVkOgogICAgICAgICAgICBtYXhfdHJhbnNmZXIgPSBtYXgoMCwgdXNlclsyXSAtIHRyYW5zZmVyX2ZlZSkKICAgICAgICAgICAgYXdhaXQgdXBkYXRlLm1lc3NhZ2UucmVwbHlfdGV4dCgKICAgICAgICAgICAgICAgIGYi4p2MINix2LXZitiv2YMg2LrZitixINmD2KfZgdmKIVxuXG4iCiAgICAgICAgICAgICAgICBmIvCfkrAg2LHYtdmK2K/Zgzoge3VzZXJbMl19INmG2YLYt9ipXG4iCiAgICAgICAgICAgICAgICBmIvCfk6Qg2KfZhNmF2KjZhNi6INin2YTZhdi32YTZiNioOiB7YW1vdW50fSDZhtmC2LfYqVxuIgogICAgICAgICAgICAgICAgZiLwn5K1INin2YTYudmF2YjZhNipOiB7dHJhbnNmZXJfZmVlfSDZhtmC2LfYqVxuIgogICAgICAgICAgICAgICAgZiLwn5KzINin2YTYpdis2YXYp9mE2Yo6IHt0b3RhbF9uZWVkZWR9INmG2YLYt9ipXG5cbiIKICAgICAgICAgICAgICAgIGYieyfZitmF2YPZhtmDINiq2K3ZiNmK2YQgJyArIHN0cihtYXhfdHJhbnNmZXIpICsgJyDZhtmC2LfYqSDZg9it2K8g2KPZgti12YknIGlmIG1heF90cmFuc2ZlciA+IDAgZWxzZSAn2LHYtdmK2K/ZgyDYutmK2LEg2YPYp9mB2Yog2YTZhNiq2K3ZiNmK2YQnfSIsCiAgICAgICAgICAgICAgICByZXBseV9tYXJrdXA9SW5saW5lS2V5Ym9hcmRNYXJrdXAoW1tJbmxpbmVLZXlib2FyZEJ1dHRvbigi8J+UmSDYsdis2YjYuSIsIGNhbGxiYWNrX2RhdGE9J2JhY2tfdG9fbWFpbicpXV0pCiAgICAgICAgICAgICkKICAgICAgICAgICAgY29udGV4dC51c2VyX2RhdGEuY2xlYXIoKQogICAgICAgICAgICByZXR1cm4gQ29udmVyc2F0aW9uSGFuZGxlci5FTkQKICAgICAgICAKICAgICAgICBjb250ZXh0LnVzZXJfZGF0YVsndHJhbnNmZXJfYW1vdW50J10gPSBhbW91bnQKICAgICAgICBjb250ZXh0LnVzZXJfZGF0YVsnc3RhdGUnXSA9ICd0cmFuc2Zlcl9pZCcKICAgICAgICBhd2FpdCB1cGRhdGUubWVzc2FnZS5yZXBseV90ZXh0KAogICAgICAgICAgICBmIvCfkrgg2LPZitiq2YUg2KrYrdmI2YrZhCB7YW1vdW50fSDZhtmC2LfYqVxuIgogICAgICAgICAgICBmIvCfkrUg2LnZhdmI2YTYqSDYp9mE2KrYrdmI2YrZhDoge3RyYW5zZmVyX2ZlZX0g2YbZgti32KlcbiIKICAgICAgICAgICAgZiLwn5KzINin2YTYpdis2YXYp9mE2Yo6IHt0b3RhbF9uZWVkZWR9INmG2YLYt9ipXG5cbiIKICAgICAgICAgICAgItij2LHYs9mEIElEINin2YTZhdiz2KrYrtiv2YUg2KfZhNmF2LPYqtmE2YU6IiwKICAgICAgICAgICAgcmVwbHlfbWFya3VwPUlubGluZUtleWJvYXJkTWFya3VwKFtbSW5saW5lS2V5Ym9hcmRCdXR0b24oIuKdjCDYpdmE2LrYp9ihIiwgY2FsbGJhY2tfZGF0YT0nY2FuY2VsJyldXSkKICAgICAgICApCiAgICAgICAgcmV0dXJuIFdBSVRJTkdfVFJBTlNGRVJfSUQKICAgIAogICAgZWxpZiBzdGF0ZSA9PSAndHJhbnNmZXJfaWQnOgogICAgICAgIGlmIG5vdCB0ZXh0IG9yIG5vdCB0ZXh0LmlzZGlnaXQoKToKICAgICAgICAgICAgYXdhaXQgdXBkYXRlLm1lc3NhZ2UucmVwbHlfdGV4dCgi4p2MINij2LHYs9mEIElEINi12K3ZititISIpCiAgICAgICAgICAgIHJldHVybiBXQUlUSU5HX1RSQU5TRkVSX0lECiAgICAgICAgCiAgICAgICAgcmVjZWl2ZXJfaWQgPSBpbnQodGV4dCkKICAgICAgICBpZiByZWNlaXZlcl9pZCA9PSB1c2VyX2lkOgogICAgICAgICAgICBhd2FpdCB1cGRhdGUubWVzc2FnZS5yZXBseV90ZXh0KCLinYwg2YTYpyDZitmF2YPZhtmDINin2YTYqtit2YjZitmEINmE2YbZgdiz2YMhIikKICAgICAgICAgICAgcmV0dXJuIFdBSVRJTkdfVFJBTlNGRVJfSUQKICAgICAgICAKICAgICAgICByZWNlaXZlciA9IGdldF91c2VyKHJlY2VpdmVyX2lkKQogICAgICAgIGlmIG5vdCByZWNlaXZlcjoKICAgICAgICAgICAgYXdhaXQgdXBkYXRlLm1lc3NhZ2UucmVwbHlfdGV4dCgi4p2MINin2YTZhdiz2KrYrtiv2YUg2LrZitixINmF2YjYrNmI2K8hIikKICAgICAgICAgICAgcmV0dXJuIFdBSVRJTkdfVFJBTlNGRVJfSUQKICAgICAgICAKICAgICAgICBhbW91bnQgPSBjb250ZXh0LnVzZXJfZGF0YVsndHJhbnNmZXJfYW1vdW50J10KICAgICAgICB0cmFuc2Zlcl9mZWUgPSBpbnQoZ2V0X3NldHRpbmcoJ3RyYW5zZmVyX2ZlZScpKQogICAgICAgIAogICAgICAgIHVwZGF0ZV9wb2ludHModXNlcl9pZCwgLShhbW91bnQgKyB0cmFuc2Zlcl9mZWUpKQogICAgICAgIHVwZGF0ZV9wb2ludHMocmVjZWl2ZXJfaWQsIGFtb3VudCkKICAgICAgICAKICAgICAgICBhZGRfdHJhbnNhY3Rpb24odXNlcl9pZCwgJ3RyYW5zZmVyX291dCcsIC0oYW1vdW50ICsgdHJhbnNmZXJfZmVlKSwgZifYqtit2YjZitmEINil2YTZiSB7cmVjZWl2ZXJfaWR9JykKICAgICAgICBhZGRfdHJhbnNhY3Rpb24ocmVjZWl2ZXJfaWQsICd0cmFuc2Zlcl9pbicsIGFtb3VudCwgZifYqtit2YjZitmEINmF2YYge3VzZXJfaWR9JykKICAgICAgICAKICAgICAgICBhd2FpdCB1cGRhdGUubWVzc2FnZS5yZXBseV90ZXh0KAogICAgICAgICAgICBmIuKchSDYqtmFINin2YTYqtit2YjZitmEINio2YbYrNin2K0hXG5cbiIKICAgICAgICAgICAgZiLwn5OkINin2YTZhdio2YTYuiDYp9mE2YXYrdmI2YQ6IHthbW91bnR9INmG2YLYt9ipXG4iCiAgICAgICAgICAgIGYi8J+StSDYp9mE2LnZhdmI2YTYqToge3RyYW5zZmVyX2ZlZX0g2YbZgti32KkiLAogICAgICAgICAgICByZXBseV9tYXJrdXA9SW5saW5lS2V5Ym9hcmRNYXJrdXAoW1tJbmxpbmVLZXlib2FyZEJ1dHRvbigi8J+UmSDYsdis2YjYuSIsIGNhbGxiYWNrX2RhdGE9J2JhY2tfdG9fbWFpbicpXV0pCiAgICAgICAgKQogICAgICAgIAogICAgICAgIHRyeToKICAgICAgICAgICAgYXdhaXQgY29udGV4dC5ib3Quc2VuZF9tZXNzYWdlKAogICAgICAgICAgICAgICAgcmVjZWl2ZXJfaWQsCiAgICAgICAgICAgICAgICBmIvCfkrAg2KfYs9iq2YTZhdiqIHthbW91bnR9INmG2YLYt9ipINmF2YYg2YXYs9iq2K7Yr9mFIHt1c2VyX2lkfSIKICAgICAgICAgICAgKQogICAgICAgIGV4Y2VwdDoKICAgICAgICAgICAgcGFzcwogICAgICAgIAogICAgICAgIGNvbnRleHQudXNlcl9kYXRhLmNsZWFyKCkKICAgICAgICByZXR1cm4gQ29udmVyc2F0aW9uSGFuZGxlci5FTkQKICAgIAogICAgZWxpZiBzdGF0ZSA9PSAnYnV5X3N0YXJzJzoKICAgICAgICBpZiBub3QgdGV4dCBvciBub3QgdGV4dC5pc2RpZ2l0KCk6CiAgICAgICAgICAgIGF3YWl0IHVwZGF0ZS5tZXNzYWdlLnJlcGx5X3RleHQoIuKdjCDYo9ix2LPZhCDYsdmC2YXYp9mLINi12K3Zitit2KfZiyEiKQogICAgICAgICAgICByZXR1cm4gV0FJVElOR19TVEFSU19BTU9VTlQKICAgICAgICAKICAgICAgICBzdGFycyA9IGludCh0ZXh0KQogICAgICAgIGlmIHN0YXJzIDwgMToKICAgICAgICAgICAgYXdhaXQgdXBkYXRlLm1lc3NhZ2UucmVwbHlfdGV4dCgi4p2MINij2YLZhCDYudiv2K8g2YbYrNmI2YUg2YfZiCAxISIpCiAgICAgICAgICAgIHJldHVybiBXQUlUSU5HX1NUQVJTX0FNT1VOVAogICAgICAgIAogICAgICAgIHN0YXJzX3JhdGlvID0gaW50KGdldF9zZXR0aW5nKCdzdGFyc19yYXRpbycpKQogICAgICAgIHBvaW50cyA9IHN0YXJzICogc3RhcnNfcmF0aW8KICAgICAgICAKICAgICAgICB0cnk6CiAgICAgICAgICAgIGludm9pY2VfbGluayA9IGF3YWl0IGNvbnRleHQuYm90LmNyZWF0ZV9pbnZvaWNlX2xpbmsoCiAgICAgICAgICAgICAgICB0aXRsZT1mIti02LHYp9ihIHtwb2ludHN9INmG2YLYt9ipIiwKICAgICAgICAgICAgICAgIGRlc2NyaXB0aW9uPWYi2KfYrdi12YQg2LnZhNmJIHtwb2ludHN9INmG2YLYt9ipINmF2YLYp9io2YQge3N0YXJzfSDZhtis2YXYqSIsCiAgICAgICAgICAgICAgICBwYXlsb2FkPWYic3RhcnNfe3VzZXJfaWR9X3twb2ludHN9IiwKICAgICAgICAgICAgICAgIHByb3ZpZGVyX3Rva2VuPSIiLAogICAgICAgICAgICAgICAgY3VycmVuY3k9IlhUUiIsCiAgICAgICAgICAgICAgICBwcmljZXM9W0xhYmVsZWRQcmljZSgi2YbZgtin2LciLCBzdGFycyldCiAgICAgICAgICAgICkKICAgICAgICAgICAgCiAgICAgICAgICAgIGF3YWl0IHVwZGF0ZS5tZXNzYWdlLnJlcGx5X3RleHQoCiAgICAgICAgICAgICAgICBmIuKtkCDYp9i22LrYtyDYudmE2Ykg2KfZhNix2KfYqNi3INmE2YTYr9mB2Lk6XG5cbiIKICAgICAgICAgICAgICAgIGYie2ludm9pY2VfbGlua31cblxuIgogICAgICAgICAgICAgICAgZiLwn5KOINiz2KrYrdi12YQg2LnZhNmJIHtwb2ludHN9INmG2YLYt9ipIiwKICAgICAgICAgICAgICAgIHJlcGx5X21hcmt1cD1JbmxpbmVLZXlib2FyZE1hcmt1cChbW0lubGluZUtleWJvYXJkQnV0dG9uKCLwn5SZINix2KzZiNi5IiwgY2FsbGJhY2tfZGF0YT0nYmFja190b19tYWluJyldXSkKICAgICAgICAgICAgKQogICAgICAgIGV4Y2VwdCBFeGNlcHRpb24gYXMgZToKICAgICAgICAgICAgYXdhaXQgdXBkYXRlLm1lc3NhZ2UucmVwbHlfdGV4dChmIuKdjCDYrdiv2Ksg2K7Yt9ijOiB7c3RyKGUpfSIpCiAgICAgICAgCiAgICAgICAgY29udGV4dC51c2VyX2RhdGEuY2xlYXIoKQogICAgICAgIHJldHVybiBDb252ZXJzYXRpb25IYW5kbGVyLkVORAogICAgCiAgICBlbGlmIHN0YXRlID09ICdhZGRfcHJvZHVjdF9uYW1lJzoKICAgICAgICBpZiB1c2VyX2lkICE9IEFETUlOX0lEIG9yIG5vdCB0ZXh0OgogICAgICAgICAgICByZXR1cm4KICAgICAgICAKICAgICAgICBjb250ZXh0LnVzZXJfZGF0YVsncHJvZHVjdF9uYW1lJ10gPSB0ZXh0CiAgICAgICAgY29udGV4dC51c2VyX2RhdGFbJ3N0YXRlJ10gPSAnYWRkX3Byb2R1Y3RfcHJpY2UnCiAgICAgICAgYXdhaXQgdXBkYXRlLm1lc3NhZ2UucmVwbHlfdGV4dCgKICAgICAgICAgICAgItij2LHYs9mEINiz2LnYsSDYp9mE2YXZhtiq2KwgKNio2KfZhNmG2YLYp9i3KToiLAogICAgICAgICAgICByZXBseV9tYXJrdXA9SW5saW5lS2V5Ym9hcmRNYXJrdXAoW1tJbmxpbmVLZXlib2FyZEJ1dHRvbigi4p2MINil2YTYutin2KEiLCBjYWxsYmFja19kYXRhPSdhZG1pbl9wYW5lbCcpXV0pCiAgICAgICAgKQogICAgCiAgICBlbGlmIHN0YXRlID09ICdhZGRfcHJvZHVjdF9wcmljZSc6CiAgICAgICAgaWYgdXNlcl9pZCAhPSBBRE1JTl9JRDoKICAgICAgICAgICAgcmV0dXJuCiAgICAgICAgCiAgICAgICAgaWYgbm90IHRleHQgb3Igbm90IHRleHQuaXNkaWdpdCgpOgogICAgICAgICAgICBhd2FpdCB1cGRhdGUubWVzc2FnZS5yZXBseV90ZXh0KCLinYwg2KPYsdiz2YQg2LHZgtmF2KfZiyDYtdit2YrYrdin2YshIikKICAgICAgICAgICAgcmV0dXJuCiAgICAgICAgCiAgICAgICAgY29udGV4dC51c2VyX2RhdGFbJ3Byb2R1Y3RfcHJpY2UnXSA9IGludCh0ZXh0KQogICAgICAgIGNvbnRleHQudXNlcl9kYXRhWydzdGF0ZSddID0gJ2FkZF9wcm9kdWN0X2NvbnRlbnQnCiAgICAgICAgYXdhaXQgdXBkYXRlLm1lc3NhZ2UucmVwbHlfdGV4dCgKICAgICAgICAgICAgItij2LHYs9mEINmF2K3YqtmI2Ykg2KfZhNmF2YbYqtisICjZhti12Iwg2LXZiNix2KnYjCDYo9mIINmF2YTZgSk6IiwKICAgICAgICAgICAgcmVwbHlfbWFya3VwPUlubGluZUtleWJvYXJkTWFya3VwKFtbSW5saW5lS2V5Ym9hcmRCdXR0b24oIuKdjCDYpdmE2LrYp9ihIiwgY2FsbGJhY2tfZGF0YT0nYWRtaW5fcGFuZWwnKV1dKQogICAgICAgICkKICAgIAogICAgZWxpZiBzdGF0ZSA9PSAnYWRkX3Byb2R1Y3RfY29udGVudCc6CiAgICAgICAgaWYgdXNlcl9pZCAhPSBBRE1JTl9JRDoKICAgICAgICAgICAgcmV0dXJuCiAgICAgICAgCiAgICAgICAgbmFtZSA9IGNvbnRleHQudXNlcl9kYXRhLmdldCgncHJvZHVjdF9uYW1lJykKICAgICAgICBwcmljZSA9IGNvbnRleHQudXNlcl9kYXRhLmdldCgncHJvZHVjdF9wcmljZScpCiAgICAgICAgCiAgICAgICAgaWYgbm90IG5hbWUgb3Igbm90IHByaWNlOgogICAgICAgICAgICBhd2FpdCB1cGRhdGUubWVzc2FnZS5yZXBseV90ZXh0KCLinYwg2K3Yr9irINiu2LfYoyEg2KfYqNiv2KMg2YXZhiDYrNiv2YrYry4iKQogICAgICAgICAgICBjb250ZXh0LnVzZXJfZGF0YS5jbGVhcigpCiAgICAgICAgICAgIHJldHVybgogICAgICAgIAogICAgICAgIGlmIHVwZGF0ZS5tZXNzYWdlLnRleHQ6CiAgICAgICAgICAgIGFkZF9wcm9kdWN0KG5hbWUsIHByaWNlLCAndGV4dCcsIHRleHQpCiAgICAgICAgICAgIGF3YWl0IHVwZGF0ZS5tZXNzYWdlLnJlcGx5X3RleHQoCiAgICAgICAgICAgICAgICAi4pyFINiq2YUg2KXYttin2YHYqSDYp9mE2YXZhtiq2Kwg2KjZhtis2KfYrSEiLAogICAgICAgICAgICAgICAgcmVwbHlfbWFya3VwPWFkbWluX2tleWJvYXJkKCkKICAgICAgICAgICAgKQogICAgICAgIGVsaWYgdXBkYXRlLm1lc3NhZ2UucGhvdG86CiAgICAgICAgICAgIGZpbGVfaWQgPSB1cGRhdGUubWVzc2FnZS5waG90b1stMV0uZmlsZV9pZAogICAgICAgICAgICBhZGRfcHJvZHVjdChuYW1lLCBwcmljZSwgJ3Bob3RvJywgZmlsZV9pZCkKICAgICAgICAgICAgYXdhaXQgdXBkYXRlLm1lc3NhZ2UucmVwbHlfdGV4dCgKICAgICAgICAgICAgICAgICLinIUg2KrZhSDYpdi22KfZgdipINin2YTZhdmG2KrYrCAo2LXZiNix2KkpINio2YbYrNin2K0hIiwKICAgICAgICAgICAgICAgIHJlcGx5X21hcmt1cD1hZG1pbl9rZXlib2FyZCgpCiAgICAgICAgICAgICkKICAgICAgICBlbGlmIHVwZGF0ZS5tZXNzYWdlLmRvY3VtZW50OgogICAgICAgICAgICBmaWxlX2lkID0gdXBkYXRlLm1lc3NhZ2UuZG9jdW1lbnQuZmlsZV9pZAogICAgICAgICAgICBhZGRfcHJvZHVjdChuYW1lLCBwcmljZSwgJ2ZpbGUnLCBmaWxlX2lkKQogICAgICAgICAgICBhd2FpdCB1cGRhdGUubWVzc2FnZS5yZXBseV90ZXh0KAogICAgICAgICAgICAgICAgIuKchSDYqtmFINil2LbYp9mB2Kkg2KfZhNmF2YbYqtisICjZhdmE2YEpINio2YbYrNin2K0hIiwKICAgICAgICAgICAgICAgIHJlcGx5X21hcmt1cD1hZG1pbl9rZXlib2FyZCgpCiAgICAgICAgICAgICkKICAgICAgICBlbHNlOgogICAgICAgICAgICBhd2FpdCB1cGRhdGUubWVzc2FnZS5yZXBseV90ZXh0KAogICAgICAgICAgICAgICAgIuKdjCDZhtmI2Lkg2LrZitixINmF2K/YudmI2YUhINij2LHYs9mEINmG2LXYjCDYtdmI2LHYqdiMINij2Ygg2YXZhNmBLiIsCiAgICAgICAgICAgICAgICByZXBseV9tYXJrdXA9SW5saW5lS2V5Ym9hcmRNYXJrdXAoW1tJbmxpbmVLZXlib2FyZEJ1dHRvbigi4p2MINil2YTYutin2KEiLCBjYWxsYmFja19kYXRhPSdhZG1pbl9wYW5lbCcpXV0pCiAgICAgICAgICAgICkKICAgICAgICAgICAgcmV0dXJuCiAgICAgICAgCiAgICAgICAgY29udGV4dC51c2VyX2RhdGEuY2xlYXIoKQogICAgCiAgICBlbGlmIHN0YXRlID09ICdicm9hZGNhc3QnOgogICAgICAgIGlmIHVzZXJfaWQgIT0gQURNSU5fSUQgb3Igbm90IHRleHQ6CiAgICAgICAgICAgIHJldHVybgogICAgICAgIAogICAgICAgIGNvbm4gPSBzcWxpdGUzLmNvbm5lY3QoJ3BvaW50c19ib3QuZGInKQogICAgICAgIGMgPSBjb25uLmN1cnNvcigpCiAgICAgICAgYy5leGVjdXRlKCdTRUxFQ1QgdXNlcl9pZCBGUk9NIHVzZXJzJykKICAgICAgICB1c2VycyA9IGMuZmV0Y2hhbGwoKQogICAgICAgIGNvbm4uY2xvc2UoKQogICAgICAgIAogICAgICAgIHN1Y2Nlc3MgPSAwCiAgICAgICAgZmFpbGVkID0gMAogICAgICAgIAogICAgICAgIGZvciB1c2VyIGluIHVzZXJzOgogICAgICAgICAgICB0cnk6CiAgICAgICAgICAgICAgICBhd2FpdCBjb250ZXh0LmJvdC5zZW5kX21lc3NhZ2UodXNlclswXSwgdGV4dCkKICAgICAgICAgICAgICAgIHN1Y2Nlc3MgKz0gMQogICAgICAgICAgICBleGNlcHQ6CiAgICAgICAgICAgICAgICBmYWlsZWQgKz0gMQogICAgICAgIAogICAgICAgIGF3YWl0IHVwZGF0ZS5tZXNzYWdlLnJlcGx5X3RleHQoCiAgICAgICAgICAgIGYi4pyFINiq2YXYqiDYp9mE2KXYsNin2LnYqSFcblxuIgogICAgICAgICAgICBmItmG2KzYrToge3N1Y2Nlc3N9XG4iCiAgICAgICAgICAgIGYi2YHYtNmEOiB7ZmFpbGVkfSIsCiAgICAgICAgICAgIHJlcGx5X21hcmt1cD1hZG1pbl9rZXlib2FyZCgpCiAgICAgICAgKQogICAgICAgIGNvbnRleHQudXNlcl9kYXRhLmNsZWFyKCkKICAgIAogICAgZWxpZiBzdGF0ZSA9PSAnYWRkX2NoYW5uZWwnOgogICAgICAgIGlmIHVzZXJfaWQgIT0gQURNSU5fSUQgb3Igbm90IHRleHQ6CiAgICAgICAgICAgIHJldHVybgogICAgICAgIAogICAgICAgIGlmIG5vdCB0ZXh0LnN0YXJ0c3dpdGgoJ0AnKToKICAgICAgICAgICAgYXdhaXQgdXBkYXRlLm1lc3NhZ2UucmVwbHlfdGV4dCgi4p2MINin2YTZhdi52LHZgSDZitis2Kgg2KPZhiDZitio2K/YoyDYqNmAIEAiKQogICAgICAgICAgICByZXR1cm4KICAgICAgICAKICAgICAgICBjaGFubmVsX3VzZXJuYW1lID0gdGV4dFsxOl0KICAgICAgICB0cnk6CiAgICAgICAgICAgIGNoYXQgPSBhd2FpdCBjb250ZXh0LmJvdC5nZXRfY2hhdChmIkB7Y2hhbm5lbF91c2VybmFtZX0iKQogICAgICAgICAgICBhZGRfY2hhbm5lbChzdHIoY2hhdC5pZCksIGNoYW5uZWxfdXNlcm5hbWUpCiAgICAgICAgICAgIGF3YWl0IHVwZGF0ZS5tZXNzYWdlLnJlcGx5X3RleHQoCiAgICAgICAgICAgICAgICBmIuKchSDYqtmFINil2LbYp9mB2Kkg2KfZhNmC2YbYp9ipIEB7Y2hhbm5lbF91c2VybmFtZX0iLAogICAgICAgICAgICAgICAgcmVwbHlfbWFya3VwPUlubGluZUtleWJvYXJkTWFya3VwKFtbSW5saW5lS2V5Ym9hcmRCdXR0b24oIvCflJkg2LHYrNmI2LkiLCBjYWxsYmFja19kYXRhPSdtYW5hZ2VfY2hhbm5lbHMnKV1dKQogICAgICAgICAgICApCiAgICAgICAgZXhjZXB0IEV4Y2VwdGlvbiBhcyBlOgogICAgICAgICAgICBhd2FpdCB1cGRhdGUubWVzc2FnZS5yZXBseV90ZXh0KGYi4p2MINiu2LfYozoge3N0cihlKX0iKQogICAgICAgIAogICAgICAgIGNvbnRleHQudXNlcl9kYXRhLmNsZWFyKCkKICAgIAogICAgZWxpZiBzdGF0ZSA9PSAnZ2lmdF9jb2RlX3BvaW50cyc6CiAgICAgICAgaWYgdXNlcl9pZCAhPSBBRE1JTl9JRDoKICAgICAgICAgICAgcmV0dXJuCiAgICAgICAgCiAgICAgICAgaWYgbm90IHRleHQgb3Igbm90IHRleHQuaXNkaWdpdCgpOgogICAgICAgICAgICBhd2FpdCB1cGRhdGUubWVzc2FnZS5yZXBseV90ZXh0KCLinYwg2KPYsdiz2YQg2LHZgtmF2KfZiyDYtdit2YrYrdin2YshIikKICAgICAgICAgICAgcmV0dXJuCiAgICAgICAgCiAgICAgICAgY29udGV4dC51c2VyX2RhdGFbJ2dpZnRfcG9pbnRzJ10gPSBpbnQodGV4dCkKICAgICAgICBjb250ZXh0LnVzZXJfZGF0YVsnc3RhdGUnXSA9ICdnaWZ0X2NvZGVfdXNlcycKICAgICAgICBhd2FpdCB1cGRhdGUubWVzc2FnZS5yZXBseV90ZXh0KAogICAgICAgICAgICAi2KPYsdiz2YQg2LnYr9ivINmF2LHYp9iqINin2YTYp9iz2KrYrtiv2KfZhToiLAogICAgICAgICAgICByZXBseV9tYXJrdXA9SW5saW5lS2V5Ym9hcmRNYXJrdXAoW1tJbmxpbmVLZXlib2FyZEJ1dHRvbigi4p2MINil2YTYutin2KEiLCBjYWxsYmFja19kYXRhPSdhZG1pbl9wYW5lbCcpXV0pCiAgICAgICAgKQogICAgCiAgICBlbGlmIHN0YXRlID09ICdnaWZ0X2NvZGVfdXNlcyc6CiAgICAgICAgaWYgdXNlcl9pZCAhPSBBRE1JTl9JRDoKICAgICAgICAgICAgcmV0dXJuCiAgICAgICAgCiAgICAgICAgaWYgbm90IHRleHQgb3Igbm90IHRleHQuaXNkaWdpdCgpOgogICAgICAgICAgICBhd2FpdCB1cGRhdGUubWVzc2FnZS5yZXBseV90ZXh0KCLinYwg2KPYsdiz2YQg2LHZgtmF2KfZiyDYtdit2YrYrdin2YshIikKICAgICAgICAgICAgcmV0dXJuCiAgICAgICAgCiAgICAgICAgcG9pbnRzID0gY29udGV4dC51c2VyX2RhdGFbJ2dpZnRfcG9pbnRzJ10KICAgICAgICBtYXhfdXNlcyA9IGludCh0ZXh0KQogICAgICAgIAogICAgICAgIGNvZGUgPSAnJy5qb2luKHJhbmRvbS5jaG9pY2VzKCdBQkNERUZHSElKS0xNTk9QUVJTVFVWV1hZWjAxMjM0NTY3ODknLCBrPTgpKQogICAgICAgIAogICAgICAgIGNvbm4gPSBzcWxpdGUzLmNvbm5lY3QoJ3BvaW50c19ib3QuZGInKQogICAgICAgIGMgPSBjb25uLmN1cnNvcigpCiAgICAgICAgYy5leGVjdXRlKCdJTlNFUlQgSU5UTyBnaWZ0X2NvZGVzIChjb2RlLCBwb2ludHMsIG1heF91c2VzKSBWQUxVRVMgKD8sID8sID8pJywKICAgICAgICAgICAgICAgICAgKGNvZGUsIHBvaW50cywgbWF4X3VzZXMpKQogICAgICAgIGNvbm4uY29tbWl0KCkKICAgICAgICBjb25uLmNsb3NlKCkKICAgICAgICAKICAgICAgICBib3RfdXNlcm5hbWUgPSAoYXdhaXQgY29udGV4dC5ib3QuZ2V0X21lKCkpLnVzZXJuYW1lCiAgICAgICAgbGluayA9IGYiaHR0cHM6Ly90Lm1lL3tib3RfdXNlcm5hbWV9P3N0YXJ0PWdpZnR7Y29kZX0iCiAgICAgICAgCiAgICAgICAgYXdhaXQgdXBkYXRlLm1lc3NhZ2UucmVwbHlfdGV4dCgKICAgICAgICAgICAgZiLinIUg2KrZhSDYpdmG2LTYp9ihINin2YTZg9mI2K8hXG5cbiIKICAgICAgICAgICAgZiLwn46BINin2YTZg9mI2K86IGB7Y29kZX1gXG4iCiAgICAgICAgICAgIGYi8J+SjiDYp9mE2YbZgtin2Lc6IHtwb2ludHN9XG4iCiAgICAgICAgICAgIGYi8J+RpSDYp9mE2KfYs9iq2K7Yr9in2YXYp9iqOiB7bWF4X3VzZXN9XG5cbiIKICAgICAgICAgICAgZiLwn5SXINin2YTYsdin2KjYtzpcbmB7bGlua31gIiwKICAgICAgICAgICAgcGFyc2VfbW9kZT0nTWFya2Rvd24nLAogICAgICAgICAgICByZXBseV9tYXJrdXA9YWRtaW5fa2V5Ym9hcmQoKQogICAgICAgICkKICAgICAgICBjb250ZXh0LnVzZXJfZGF0YS5jbGVhcigpCiAgICAKICAgIGVsaWYgc3RhdGUgPT0gJ2VkaXRfcmVmZXJyYWxfcG9pbnRzJzoKICAgICAgICBpZiB1c2VyX2lkICE9IEFETUlOX0lEOgogICAgICAgICAgICByZXR1cm4KICAgICAgICAKICAgICAgICBpZiBub3QgdGV4dCBvciBub3QgdGV4dC5pc2RpZ2l0KCk6CiAgICAgICAgICAgIGF3YWl0IHVwZGF0ZS5tZXNzYWdlLnJlcGx5X3RleHQoIuKdjCDYo9ix2LPZhCDYsdmC2YXYp9mLINi12K3Zitit2KfZiyEiKQogICAgICAgICAgICByZXR1cm4KICAgICAgICAKICAgICAgICBzZXRfc2V0dGluZygncmVmZXJyYWxfcG9pbnRzJywgdGV4dCkKICAgICAgICBhd2FpdCB1cGRhdGUubWVzc2FnZS5yZXBseV90ZXh0KAogICAgICAgICAgICBmIuKchSDYqtmFINiq2K3Yr9mK2Ksg2YbZgtin2Lcg2KfZhNil2K3Yp9mE2Kkg2KXZhNmJIHt0ZXh0fSIsCiAgICAgICAgICAgIHJlcGx5X21hcmt1cD1JbmxpbmVLZXlib2FyZE1hcmt1cChbW0lubGluZUtleWJvYXJkQnV0dG9uKCLwn5SZINix2KzZiNi5IiwgY2FsbGJhY2tfZGF0YT0nYWRtaW5fc2V0dGluZ3MnKV1dKQogICAgICAgICkKICAgICAgICBjb250ZXh0LnVzZXJfZGF0YS5jbGVhcigpCiAgICAKICAgIGVsaWYgc3RhdGUgPT0gJ2VkaXRfdHJhbnNmZXJfZmVlJzoKICAgICAgICBpZiB1c2VyX2lkICE9IEFETUlOX0lEOgogICAgICAgICAgICByZXR1cm4KICAgICAgICAKICAgICAgICBpZiBub3QgdGV4dCBvciBub3QgdGV4dC5pc2RpZ2l0KCk6CiAgICAgICAgICAgIGF3YWl0IHVwZGF0ZS5tZXNzYWdlLnJlcGx5X3RleHQoIuKdjCDYo9ix2LPZhCDYsdmC2YXYp9mLINi12K3Zitit2KfZiyEiKQogICAgICAgICAgICByZXR1cm4KICAgICAgICAKICAgICAgICBzZXRfc2V0dGluZygndHJhbnNmZXJfZmVlJywgdGV4dCkKICAgICAgICBhd2FpdCB1cGRhdGUubWVzc2FnZS5yZXBseV90ZXh0KAogICAgICAgICAgICBmIuKchSDYqtmFINiq2K3Yr9mK2Ksg2LHYs9mI2YUg2KfZhNiq2K3ZiNmK2YQg2KXZhNmJIHt0ZXh0fSIsCiAgICAgICAgICAgIHJlcGx5X21hcmt1cD1JbmxpbmVLZXlib2FyZE1hcmt1cChbW0lubGluZUtleWJvYXJkQnV0dG9uKCLwn5SZINix2KzZiNi5IiwgY2FsbGJhY2tfZGF0YT0nYWRtaW5fc2V0dGluZ3MnKV1dKQogICAgICAgICkKICAgICAgICBjb250ZXh0LnVzZXJfZGF0YS5jbGVhcigpCiAgICAKICAgIGVsaWYgc3RhdGUgPT0gJ2VkaXRfc3RhcnNfcmF0aW8nOgogICAgICAgIGlmIHVzZXJfaWQgIT0gQURNSU5fSUQ6CiAgICAgICAgICAgIHJldHVybgogICAgICAgIAogICAgICAgIGlmIG5vdCB0ZXh0IG9yIG5vdCB0ZXh0LmlzZGlnaXQoKToKICAgICAgICAgICAgYXdhaXQgdXBkYXRlLm1lc3NhZ2UucmVwbHlfdGV4dCgi4p2MINij2LHYs9mEINix2YLZhdin2Ysg2LXYrdmK2K3Yp9mLISIpCiAgICAgICAgICAgIHJldHVybgogICAgICAgIAogICAgICAgIHNldF9zZXR0aW5nKCdzdGFyc19yYXRpbycsIHRleHQpCiAgICAgICAgYXdhaXQgdXBkYXRlLm1lc3NhZ2UucmVwbHlfdGV4dCgKICAgICAgICAgICAgZiLinIUg2KrZhSDYqtit2K/ZitirINmG2LPYqNipINin2YTZhtis2YjZhSDYpdmE2Ykge3RleHR9INmG2YLYt9ipINmE2YPZhCDZhtis2YXYqSIsCiAgICAgICAgICAgIHJlcGx5X21hcmt1cD1JbmxpbmVLZXlib2FyZE1hcmt1cChbW0lubGluZUtleWJvYXJkQnV0dG9uKCLwn5SZINix2KzZiNi5IiwgY2FsbGJhY2tfZGF0YT0nYWRtaW5fc2V0dGluZ3MnKV1dKQogICAgICAgICkKICAgICAgICBjb250ZXh0LnVzZXJfZGF0YS5jbGVhcigpCiAgICAKICAgIGVsaWYgc3RhdGUgPT0gJ2VkaXRfd2VsY29tZSc6CiAgICAgICAgaWYgdXNlcl9pZCAhPSBBRE1JTl9JRCBvciBub3QgdGV4dDoKICAgICAgICAgICAgcmV0dXJuCiAgICAgICAgCiAgICAgICAgc2V0X3NldHRpbmcoJ3dlbGNvbWVfbWVzc2FnZScsIHRleHQpCiAgICAgICAgYXdhaXQgdXBkYXRlLm1lc3NhZ2UucmVwbHlfdGV4dCgKICAgICAgICAgICAgIuKchSDYqtmFINiq2K3Yr9mK2Ksg2LHYs9in2YTYqSDYp9mE2KrYsdit2YrYqCIsCiAgICAgICAgICAgIHJlcGx5X21hcmt1cD1JbmxpbmVLZXlib2FyZE1hcmt1cChbW0lubGluZUtleWJvYXJkQnV0dG9uKCLwn5SZINix2KzZiNi5IiwgY2FsbGJhY2tfZGF0YT0nYWRtaW5fc2V0dGluZ3MnKV1dKQogICAgICAgICkKICAgICAgICBjb250ZXh0LnVzZXJfZGF0YS5jbGVhcigpCiAgICAKICAgIGVsaWYgc3RhdGUgPT0gJ2VkaXRfZml4ZWRfZ2lmdCc6CiAgICAgICAgaWYgdXNlcl9pZCAhPSBBRE1JTl9JRDoKICAgICAgICAgICAgcmV0dXJuCiAgICAgICAgCiAgICAgICAgaWYgbm90IHRleHQgb3Igbm90IHRleHQuaXNkaWdpdCgpOgogICAgICAgICAgICBhd2FpdCB1cGRhdGUubWVzc2FnZS5yZXBseV90ZXh0KCLinYwg2KPYsdiz2YQg2LHZgtmF2KfZiyDYtdit2YrYrdin2YshIikKICAgICAgICAgICAgcmV0dXJuCiAgICAgICAgCiAgICAgICAgc2V0X3NldHRpbmcoJ2RhaWx5X2dpZnRfcG9pbnRzJywgdGV4dCkKICAgICAgICBhd2FpdCB1cGRhdGUubWVzc2FnZS5yZXBseV90ZXh0KAogICAgICAgICAgICBmIuKchSDYqtmFINiq2K3Yr9mK2Ksg2KfZhNmH2K/ZitipINin2YTZitmI2YXZitipINil2YTZiSB7dGV4dH0g2YbZgti32KkiLAogICAgICAgICAgICByZXBseV9tYXJrdXA9SW5saW5lS2V5Ym9hcmRNYXJrdXAoW1tJbmxpbmVLZXlib2FyZEJ1dHRvbigi8J+UmSDYsdis2YjYuSIsIGNhbGxiYWNrX2RhdGE9J2FkbWluX3NldHRpbmdzJyldXSkKICAgICAgICApCiAgICAgICAgY29udGV4dC51c2VyX2RhdGEuY2xlYXIoKQogICAgCiAgICBlbGlmIHN0YXRlID09ICdlZGl0X3JhbmRvbV9naWZ0X21pbic6CiAgICAgICAgaWYgdXNlcl9pZCAhPSBBRE1JTl9JRDoKICAgICAgICAgICAgcmV0dXJuCiAgICAgICAgCiAgICAgICAgaWYgbm90IHRleHQgb3Igbm90IHRleHQuaXNkaWdpdCgpOgogICAgICAgICAgICBhd2FpdCB1cGRhdGUubWVzc2FnZS5yZXBseV90ZXh0KCLinYwg2KPYsdiz2YQg2LHZgtmF2KfZiyDYtdit2YrYrdin2YshIikKICAgICAgICAgICAgcmV0dXJuCiAgICAgICAgCiAgICAgICAgY29udGV4dC51c2VyX2RhdGFbJ2dpZnRfbWluJ10gPSB0ZXh0CiAgICAgICAgY29udGV4dC51c2VyX2RhdGFbJ3N0YXRlJ10gPSAnZWRpdF9yYW5kb21fZ2lmdF9tYXgnCiAgICAgICAgYXdhaXQgdXBkYXRlLm1lc3NhZ2UucmVwbHlfdGV4dCgKICAgICAgICAgICAgItij2LHYs9mEINin2YTYrdivINin2YTYo9mC2LXZiSDZhNmE2YbZgtin2Lc6IiwKICAgICAgICAgICAgcmVwbHlfbWFya3VwPUlubGluZUtleWJvYXJkTWFya3VwKFtbSW5saW5lS2V5Ym9hcmRCdXR0b24oIuKdjCDYpdmE2LrYp9ihIiwgY2FsbGJhY2tfZGF0YT0nYWRtaW5fc2V0dGluZ3MnKV1dKQogICAgICAgICkKICAgIAogICAgZWxpZiBzdGF0ZSA9PSAnZWRpdF9yYW5kb21fZ2lmdF9tYXgnOgogICAgICAgIGlmIHVzZXJfaWQgIT0gQURNSU5fSUQ6CiAgICAgICAgICAgIHJldHVybgogICAgICAgIAogICAgICAgIGlmIG5vdCB0ZXh0IG9yIG5vdCB0ZXh0LmlzZGlnaXQoKToKICAgICAgICAgICAgYXdhaXQgdXBkYXRlLm1lc3NhZ2UucmVwbHlfdGV4dCgi4p2MINij2LHYs9mEINix2YLZhdin2Ysg2LXYrdmK2K3Yp9mLISIpCiAgICAgICAgICAgIHJldHVybgogICAgICAgIAogICAgICAgIG1pbl92YWwgPSBjb250ZXh0LnVzZXJfZGF0YVsnZ2lmdF9taW4nXQogICAgICAgIHNldF9zZXR0aW5nKCdkYWlseV9naWZ0X21pbicsIG1pbl92YWwpCiAgICAgICAgc2V0X3NldHRpbmcoJ2RhaWx5X2dpZnRfbWF4JywgdGV4dCkKICAgICAgICAKICAgICAgICBhd2FpdCB1cGRhdGUubWVzc2FnZS5yZXBseV90ZXh0KAogICAgICAgICAgICBmIuKchSDYqtmFINiq2K3Yr9mK2Ksg2KfZhNmH2K/ZitipINin2YTYudi02YjYp9im2YrYqSDZhdmGIHttaW5fdmFsfSDYpdmE2Ykge3RleHR9INmG2YLYt9ipIiwKICAgICAgICAgICAgcmVwbHlfbWFya3VwPUlubGluZUtleWJvYXJkTWFya3VwKFtbSW5saW5lS2V5Ym9hcmRCdXR0b24oIvCflJkg2LHYrNmI2LkiLCBjYWxsYmFja19kYXRhPSdhZG1pbl9zZXR0aW5ncycpXV0pCiAgICAgICAgKQogICAgICAgIGNvbnRleHQudXNlcl9kYXRhLmNsZWFyKCkKICAgIAogICAgZWxpZiBzdGF0ZSA9PSAnc2VhcmNoX3Byb2R1Y3QnOgogICAgICAgIGlmIG5vdCB0ZXh0OgogICAgICAgICAgICByZXR1cm4KICAgICAgICAKICAgICAgICBzZWFyY2hfdGVybSA9IHRleHQubG93ZXIoKQogICAgICAgIHByb2R1Y3RzID0gZ2V0X3Byb2R1Y3RzKCkKICAgICAgICByZXN1bHRzID0gW3AgZm9yIHAgaW4gcHJvZHVjdHMgaWYgc2VhcmNoX3Rlcm0gaW4gcFsxXS5sb3dlcigpXQogICAgICAgIAogICAgICAgIGlmIG5vdCByZXN1bHRzOgogICAgICAgICAgICBhd2FpdCB1cGRhdGUubWVzc2FnZS5yZXBseV90ZXh0KAogICAgICAgICAgICAgICAgIuKdjCDZhNmFINmK2KrZhSDYp9mE2LnYq9mI2LEg2LnZhNmJINmF2YbYqtis2KfYqiEiLAogICAgICAgICAgICAgICAgcmVwbHlfbWFya3VwPUlubGluZUtleWJvYXJkTWFya3VwKFtbSW5saW5lS2V5Ym9hcmRCdXR0b24oIvCflJkg2LHYrNmI2Lkg2YTZhNmF2KrYrNixIiwgY2FsbGJhY2tfZGF0YT0nc2hvcCcpXV0pCiAgICAgICAgICAgICkKICAgICAgICAgICAgY29udGV4dC51c2VyX2RhdGEuY2xlYXIoKQogICAgICAgICAgICByZXR1cm4KICAgICAgICAKICAgICAgICB1c2VyID0gZ2V0X3VzZXIodXNlcl9pZCkKICAgICAgICB1c2VyX3BvaW50cyA9IHVzZXJbMl0gaWYgdXNlciBlbHNlIDAKICAgICAgICAKICAgICAgICBrZXlib2FyZCA9IFtdCiAgICAgICAgZm9yIHByb2R1Y3QgaW4gcmVzdWx0czoKICAgICAgICAgICAgZW1vamkgPSAi4pyFIiBpZiB1c2VyX3BvaW50cyA+PSBwcm9kdWN0WzJdIGVsc2UgIuKdjCIKICAgICAgICAgICAga2V5Ym9hcmQuYXBwZW5kKFtJbmxpbmVLZXlib2FyZEJ1dHRvbigKICAgICAgICAgICAgICAgIGYie2Vtb2ppfSB7cHJvZHVjdFsxXX0gLSB7cHJvZHVjdFsyXX0g2YbZgti32KkiLAogICAgICAgICAgICAgICAgY2FsbGJhY2tfZGF0YT1mJ2J1eV97cHJvZHVjdFswXX0nCiAgICAgICAgICAgICldKQogICAgICAgIGtleWJvYXJkLmFwcGVuZChbSW5saW5lS2V5Ym9hcmRCdXR0b24oIvCflJkg2LHYrNmI2Lkg2YTZhNmF2KrYrNixIiwgY2FsbGJhY2tfZGF0YT0nc2hvcCcpXSkKICAgICAgICAKICAgICAgICBhd2FpdCB1cGRhdGUubWVzc2FnZS5yZXBseV90ZXh0KAogICAgICAgICAgICBmIvCflI0g2YbYqtin2KbYrCDYp9mE2KjYrdirOiB7bGVuKHJlc3VsdHMpfVxu8J+SsCDYsdi12YrYr9mDOiB7dXNlcl9wb2ludHN9INmG2YLYt9ipIiwKICAgICAgICAgICAgcmVwbHlfbWFya3VwPUlubGluZUtleWJvYXJkTWFya3VwKGtleWJvYXJkKQogICAgICAgICkKICAgICAgICBjb250ZXh0LnVzZXJfZGF0YS5jbGVhcigpCgojINmF2LnYp9mE2KzYqSDYp9mE2K/Zgdi5CmFzeW5jIGRlZiBwcmVjaGVja291dF9jYWxsYmFjayh1cGRhdGU6IFVwZGF0ZSwgY29udGV4dDogQ29udGV4dFR5cGVzLkRFRkFVTFRfVFlQRSk6CiAgICBxdWVyeSA9IHVwZGF0ZS5wcmVfY2hlY2tvdXRfcXVlcnkKICAgIGF3YWl0IHF1ZXJ5LmFuc3dlcihvaz1UcnVlKQoKYXN5bmMgZGVmIHN1Y2Nlc3NmdWxfcGF5bWVudCh1cGRhdGU6IFVwZGF0ZSwgY29udGV4dDogQ29udGV4dFR5cGVzLkRFRkFVTFRfVFlQRSk6CiAgICBwYXltZW50ID0gdXBkYXRlLm1lc3NhZ2Uuc3VjY2Vzc2Z1bF9wYXltZW50CiAgICBwYXlsb2FkID0gcGF5bWVudC5pbnZvaWNlX3BheWxvYWQKICAgIAogICAgaWYgcGF5bG9hZC5zdGFydHN3aXRoKCdzdGFyc18nKToKICAgICAgICBwYXJ0cyA9IHBheWxvYWQuc3BsaXQoJ18nKQogICAgICAgIHVzZXJfaWQgPSBpbnQocGFydHNbMV0pCiAgICAgICAgcG9pbnRzID0gaW50KHBhcnRzWzJdKQogICAgICAgIAogICAgICAgIHVwZGF0ZV9wb2ludHModXNlcl9pZCwgcG9pbnRzKQogICAgICAgIGFkZF90cmFuc2FjdGlvbih1c2VyX2lkLCAncHVyY2hhc2Vfc3RhcnMnLCBwb2ludHMsIGYn2LTYsdin2KEg2KjZgCB7cGF5bWVudC50b3RhbF9hbW91bnR9INmG2KzZhdipJykKICAgICAgICAKICAgICAgICBhd2FpdCB1cGRhdGUubWVzc2FnZS5yZXBseV90ZXh0KAogICAgICAgICAgICBmIuKchSDYqtmFINin2YTYr9mB2Lkg2KjZhtis2KfYrSFcblxuIgogICAgICAgICAgICBmIvCfko4g2K3YtdmE2Kog2LnZhNmJIHtwb2ludHN9INmG2YLYt9ipIiwKICAgICAgICAgICAgcmVwbHlfbWFya3VwPW1haW5fa2V5Ym9hcmQodXNlcl9pZCkKICAgICAgICApCiAgICAgICAgCiAgICAgICAgdHJ5OgogICAgICAgICAgICBidXllciA9IHVwZGF0ZS5tZXNzYWdlLmZyb21fdXNlcgogICAgICAgICAgICBidXllcl91c2VybmFtZSA9IGYiQHtidXllci51c2VybmFtZX0iIGlmIGJ1eWVyLnVzZXJuYW1lIGVsc2UgItmE2Kcg2YrZiNis2K8iCiAgICAgICAgICAgIGJ1eWVyX25hbWUgPSBidXllci5maXJzdF9uYW1lICsgKCIgIiArIGJ1eWVyLmxhc3RfbmFtZSBpZiBidXllci5sYXN0X25hbWUgZWxzZSAiIikKICAgICAgICAgICAgYnV5ZXJfbGluayA9IGYidGc6Ly91c2VyP2lkPXt1c2VyX2lkfSIKICAgICAgICAgICAgY2hhcmdlX2lkID0gcGF5bWVudC50ZWxlZ3JhbV9wYXltZW50X2NoYXJnZV9pZAogICAgICAgICAgICAKICAgICAgICAgICAgY29ubiA9IHNxbGl0ZTMuY29ubmVjdCgncG9pbnRzX2JvdC5kYicpCiAgICAgICAgICAgIGMgPSBjb25uLmN1cnNvcigpCiAgICAgICAgICAgIGNyZWF0ZWRfYXQgPSBkYXRldGltZS5ub3coKS5zdHJmdGltZSgnJVktJW0tJWQgJUg6JU06JVMnKQogICAgICAgICAgICBjLmV4ZWN1dGUoJ0lOU0VSVCBJTlRPIHJlZnVuZF9yZXF1ZXN0cyAodXNlcl9pZCwgY2hhcmdlX2lkLCBjcmVhdGVkX2F0KSBWQUxVRVMgKD8sID8sID8pJywKICAgICAgICAgICAgICAgICAgICAgICh1c2VyX2lkLCBjaGFyZ2VfaWQsIGNyZWF0ZWRfYXQpKQogICAgICAgICAgICBjb25uLmNvbW1pdCgpCiAgICAgICAgICAgIHJlZnVuZF9pZCA9IGMubGFzdHJvd2lkCiAgICAgICAgICAgIGNvbm4uY2xvc2UoKQogICAgICAgICAgICAKICAgICAgICAgICAgcmVmdW5kX2tleWJvYXJkID0gSW5saW5lS2V5Ym9hcmRNYXJrdXAoW1sKICAgICAgICAgICAgICAgIElubGluZUtleWJvYXJkQnV0dG9uKCLwn5SEINin2LPYqtix2K/Yp9ivINin2YTZhtis2YjZhSIsIGNhbGxiYWNrX2RhdGE9ZidyZWZ1bmRfe3JlZnVuZF9pZH0nKQogICAgICAgICAgICBdXSkKICAgICAgICAgICAgCiAgICAgICAgICAgIGFkbWluX25vdGlmaWNhdGlvbiA9ICgKICAgICAgICAgICAgICAgIGYi4q2QINi52YXZhNmK2Kkg2LTYsdin2KEg2YbYrNmI2YUhXG5cbiIKICAgICAgICAgICAgICAgIGYi8J+RpCDYp9mE2YXYtNiq2LHZijoge2J1eWVyX25hbWV9XG4iCiAgICAgICAgICAgICAgICBmIvCfhpQgSUQ6IGB7dXNlcl9pZH1gXG4iCiAgICAgICAgICAgICAgICBmIvCfkYHvuI8g2KfZhNix2KfYqNi3OiBb2YHYqtitINin2YTZhdmE2YEg2KfZhNi02K7YtdmKXSh7YnV5ZXJfbGlua30pXG4iCiAgICAgICAgICAgICAgICBmIvCfk7Eg2KfZhNmF2LnYsdmBOiB7YnV5ZXJfdXNlcm5hbWV9XG5cbiIKICAgICAgICAgICAgICAgIGYi8J+SqyDYp9mE2YbYrNmI2YUg2KfZhNmF2LTYqtix2KfYqToge3BheW1lbnQudG90YWxfYW1vdW50fVxuIgogICAgICAgICAgICAgICAgZiLwn5KOINin2YTZhtmC2KfYtyDYp9mE2YXYttin2YHYqToge3BvaW50c31cbiIKICAgICAgICAgICAgICAgIGYi8J+UkSBDaGFyZ2UgSUQ6XG5ge2NoYXJnZV9pZH1gXG5cbiIKICAgICAgICAgICAgICAgIGYi8J+VkCDYp9mE2YjZgtiqOiB7ZGF0ZXRpbWUubm93KCkuc3RyZnRpbWUoJyVZLSVtLSVkICVIOiVNOiVTJyl9XG5cbiIKICAgICAgICAgICAgICAgIGYi8J+SoSDZhNmE2KfYs9iq2LHYr9in2K8g2KfZhNmK2K/ZiNmKINin2LPYqtiu2K/ZhTpcbiIKICAgICAgICAgICAgICAgIGYiYC9yZWZ1bmQge3VzZXJfaWR9IHtjaGFyZ2VfaWR9YCIKICAgICAgICAgICAgKQogICAgICAgICAgICAKICAgICAgICAgICAgYXdhaXQgY29udGV4dC5ib3Quc2VuZF9tZXNzYWdlKAogICAgICAgICAgICAgICAgQURNSU5fSUQsCiAgICAgICAgICAgICAgICBhZG1pbl9ub3RpZmljYXRpb24sCiAgICAgICAgICAgICAgICBwYXJzZV9tb2RlPSdNYXJrZG93bicsCiAgICAgICAgICAgICAgICByZXBseV9tYXJrdXA9cmVmdW5kX2tleWJvYXJkCiAgICAgICAgICAgICkKICAgICAgICBleGNlcHQgRXhjZXB0aW9uIGFzIGU6CiAgICAgICAgICAgIGxvZ2dlci5lcnJvcihmItmB2LTZhCDYpdix2LPYp9mEINil2LTYudin2LEg2YTZhNmF2LTYsdmBOiB7ZX0iKQoKIyDYo9mF2LEg2YTZiNit2Kkg2KfZhNiq2K3Zg9mFCmFzeW5jIGRlZiBhZG1pbih1cGRhdGU6IFVwZGF0ZSwgY29udGV4dDogQ29udGV4dFR5cGVzLkRFRkFVTFRfVFlQRSk6CiAgICBpZiB1cGRhdGUuZWZmZWN0aXZlX3VzZXIuaWQgIT0gQURNSU5fSUQ6CiAgICAgICAgYXdhaXQgdXBkYXRlLm1lc3NhZ2UucmVwbHlfdGV4dCgi4p2MINi62YrYsSDZhdi12LHYrSDZhNmDISIpCiAgICAgICAgcmV0dXJuCiAgICAKICAgIGF3YWl0IHVwZGF0ZS5tZXNzYWdlLnJlcGx5X3RleHQoIvCfjpvvuI8g2YTZiNit2Kkg2KfZhNiq2K3Zg9mFIiwgcmVwbHlfbWFya3VwPWFkbWluX2tleWJvYXJkKCkpCgojINij2YXYsSDYp9iz2KrYsdiv2KfYryDYp9mE2YbYrNmI2YUg2YrYr9mI2YrYp9mLCmFzeW5jIGRlZiByZWZ1bmRfc3RhcnModXBkYXRlOiBVcGRhdGUsIGNvbnRleHQ6IENvbnRleHRUeXBlcy5ERUZBVUxUX1RZUEUpOgogICAgdXNlcl9pZCA9IHVwZGF0ZS5tZXNzYWdlLmZyb21fdXNlci5pZAogICAgCiAgICBpZiB1c2VyX2lkICE9IEFETUlOX0lEOgogICAgICAgIGF3YWl0IHVwZGF0ZS5tZXNzYWdlLnJlcGx5X3RleHQoIuKblCDZhNmK2LMg2YTYr9mK2YMg2LXZhNin2K3ZitipINin2LPYqtiu2K/Yp9mFINmH2LDYpyDYp9mE2KPZhdixISIpCiAgICAgICAgcmV0dXJuCiAgICAKICAgIGlmIGxlbihjb250ZXh0LmFyZ3MpIDwgMjoKICAgICAgICBoZWxwX3RleHQgPSAoCiAgICAgICAgICAgICLinYwgKirYp9iz2KrYrtiv2KfZhSDYrtin2LfYpiEqKlxuXG4iCiAgICAgICAgICAgICIqKtin2YTYtdmK2LrYqSDYp9mE2LXYrdmK2K3YqToqKlxuIgogICAgICAgICAgICAiYC9yZWZ1bmQgPHVzZXJfaWQ+IDxjaGFyZ2VfaWQ+YFxuXG4iCiAgICAgICAgICAgICIqKtmF2KvYp9mEOioqXG4iCiAgICAgICAgICAgICJgL3JlZnVuZCAxMjM0NTY3ODkgc3R4Y094alQ1UF9LTHNRTnpPWXouLi5gXG5cbiIKICAgICAgICAgICAgIioq8J+TnSDZg9mK2YEg2KrYrdi12YQg2LnZhNmJINin2YTZhdi52YTZiNmF2KfYqjoqKlxuIgogICAgICAgICAgICAi4oCiICoqVXNlciBJRCoqOiDZhdmGINil2LTYudin2LEg2KfZhNi02LHYp9ihXG4iCiAgICAgICAgICAgICLigKIgKipDaGFyZ2UgSUQqKjog2LHZgtmFINin2YTZhdi52KfZhdmE2Kkg2YXZhiDYpdi02LnYp9ixINin2YTYr9mB2LlcblxuIgogICAgICAgICAgICAiKirij7Ag2YXZhNin2K3YuNipOioqXG4iCiAgICAgICAgICAgICLZitmF2YPZhiDYpdix2KzYp9i5INin2YTZhtis2YjZhSDYrtmE2KfZhCAxODAg2YrZiNmF2YvYpyDZhdmGINiq2KfYsdmK2K4g2KfZhNiv2YHYuSIKICAgICAgICApCiAgICAgICAgYXdhaXQgdXBkYXRlLm1lc3NhZ2UucmVwbHlfdGV4dChoZWxwX3RleHQsIHBhcnNlX21vZGU9J01hcmtkb3duJykKICAgICAgICByZXR1cm4KICAgIAogICAgdHJ5OgogICAgICAgIHRhcmdldF91c2VyX2lkID0gaW50KGNvbnRleHQuYXJnc1swXSkKICAgICAgICBjaGFyZ2VfaWQgPSAiICIuam9pbihjb250ZXh0LmFyZ3NbMTpdKQogICAgZXhjZXB0IFZhbHVlRXJyb3I6CiAgICAgICAgYXdhaXQgdXBkYXRlLm1lc3NhZ2UucmVwbHlfdGV4dCgi4p2MINmF2LnYsdmBINin2YTZhdiz2KrYrtiv2YUg2YrYrNioINij2YYg2YrZg9mI2YYg2LHZgtmF2YvYpyEiKQogICAgICAgIHJldHVybgogICAgCiAgICBsb2FkaW5nX21zZyA9IGF3YWl0IHVwZGF0ZS5tZXNzYWdlLnJlcGx5X3RleHQoIuKPsyDYrNin2LHZiiDZhdit2KfZiNmE2Kkg2KXYsdis2KfYuSDYp9mE2YbYrNmI2YUuLi4iKQogICAgCiAgICB0cnk6CiAgICAgICAgYXdhaXQgY29udGV4dC5ib3QucmVmdW5kX3N0YXJfcGF5bWVudCgKICAgICAgICAgICAgdXNlcl9pZD10YXJnZXRfdXNlcl9pZCwKICAgICAgICAgICAgdGVsZWdyYW1fcGF5bWVudF9jaGFyZ2VfaWQ9Y2hhcmdlX2lkCiAgICAgICAgKQogICAgICAgIAogICAgICAgIHN1Y2Nlc3NfdGV4dCA9ICgKICAgICAgICAgICAgZiLinIUgKirYqtmFINil2LHYrNin2Lkg2KfZhNmG2KzZiNmFINio2YbYrNin2K0hKipcblxuIgogICAgICAgICAgICBmIvCfkaQgKirZhdi52LHZgSDYp9mE2YXYs9iq2K7Yr9mFOioqIGB7dGFyZ2V0X3VzZXJfaWR9YFxuIgogICAgICAgICAgICBmIvCfhpQgKirYsdmC2YUg2KfZhNmF2LnYp9mF2YTYqToqKlxuYHtjaGFyZ2VfaWR9YFxuIgogICAgICAgICAgICBmIuKPsCAqKtmI2YLYqiDYp9mE2KfYs9iq2LHYr9in2K86Kioge2RhdGV0aW1lLm5vdygpLnN0cmZ0aW1lKCclWS0lbS0lZCAlSDolTTolUycpfVxuXG4iCiAgICAgICAgICAgIGYi8J+SoSDYqtmFINil2LHYrNin2Lkg2KfZhNmG2KzZiNmFINmE2YTZhdiz2KrYrtiv2YUhIgogICAgICAgICkKICAgICAgICBhd2FpdCBsb2FkaW5nX21zZy5lZGl0X3RleHQoc3VjY2Vzc190ZXh0LCBwYXJzZV9tb2RlPSdNYXJrZG93bicpCiAgICAgICAgCiAgICAgICAgdHJ5OgogICAgICAgICAgICBhd2FpdCBjb250ZXh0LmJvdC5zZW5kX21lc3NhZ2UoCiAgICAgICAgICAgICAgICBjaGF0X2lkPXRhcmdldF91c2VyX2lkLAogICAgICAgICAgICAgICAgdGV4dD0oCiAgICAgICAgICAgICAgICAgICAgZiLwn5KwICoq2KrZhSDYpdix2KzYp9i5INin2YTZhtis2YjZhSDYpdmE2Ykg2K3Ys9in2KjZgyEqKlxuXG4iCiAgICAgICAgICAgICAgICAgICAgZiLwn4aUINix2YLZhSDYp9mE2YXYudin2YXZhNipOlxuYHtjaGFyZ2VfaWR9YFxuXG4iCiAgICAgICAgICAgICAgICAgICAgZiLYtNmD2LHZi9inINmE2KrYudin2YXZhNmDINmF2LnZhtinISDwn5KrIgogICAgICAgICAgICAgICAgKSwKICAgICAgICAgICAgICAgIHBhcnNlX21vZGU9J01hcmtkb3duJwogICAgICAgICAgICApCiAgICAgICAgZXhjZXB0IEV4Y2VwdGlvbiBhcyBlOgogICAgICAgICAgICBsb2dnZXIud2FybmluZyhmItmE2YUg2YrYqtmFINil2LHYs9in2YQg2KXYtNi52KfYsSDZhNmE2YXYs9iq2K7Yr9mFOiB7ZX0iKQogICAgICAgIAogICAgZXhjZXB0IEV4Y2VwdGlvbiBhcyBlOgogICAgICAgIGVycm9yX21lc3NhZ2UgPSBzdHIoZSkKICAgICAgICAKICAgICAgICBpZiAiQ0hBUkdFX0FMUkVBRFlfUkVGVU5ERUQiIGluIGVycm9yX21lc3NhZ2U6CiAgICAgICAgICAgIGVycm9yX3RleHQgPSAoCiAgICAgICAgICAgICAgICBmIuKaoO+4jyAqKtiq2YUg2KXYsdis2KfYuSDYp9mE2YbYrNmI2YUg2YTZh9iw2Ycg2KfZhNmF2LnYp9mF2YTYqSDZhdiz2KjZgtmL2KchKipcblxuIgogICAgICAgICAgICAgICAgZiLwn4aUINix2YLZhSDYp9mE2YXYudin2YXZhNipOiBge2NoYXJnZV9pZH1gIgogICAgICAgICAgICApCiAgICAgICAgZWxpZiAiQ0hBUkdFX05PVF9GT1VORCIgaW4gZXJyb3JfbWVzc2FnZSBvciAibm90IGZvdW5kIiBpbiBlcnJvcl9tZXNzYWdlLmxvd2VyKCk6CiAgICAgICAgICAgIGVycm9yX3RleHQgPSAoCiAgICAgICAgICAgICAgICBmIuKdjCAqKtix2YLZhSDYp9mE2YXYudin2YXZhNipINi62YrYsSDYtdit2YrYrSEqKlxuXG4iCiAgICAgICAgICAgICAgICBmItin2YTYo9iz2KjYp9ioINin2YTZhdit2KrZhdmE2Kk6XG4iCiAgICAgICAgICAgICAgICBmIuKAoiDYsdmC2YUg2KfZhNmF2LnYp9mF2YTYqSDYrtin2LfYplxuIgogICAgICAgICAgICAgICAgZiLigKIg2KfZhNmF2LnYp9mF2YTYqSDZgtiv2YrZhdipICjYo9mD2KvYsSDZhdmGIDE4MCDZitmI2YUpXG4iCiAgICAgICAgICAgICAgICBmIuKAoiDYp9mE2YXYudin2YXZhNipINmE2YUg2KrZg9iq2YXZhFxuXG4iCiAgICAgICAgICAgICAgICBmIvCfhpQg2KfZhNix2YLZhSDYp9mE2YXYs9iq2K7Yr9mFOlxuYHtjaGFyZ2VfaWR9YCIKICAgICAgICAgICAgKQogICAgICAgIGVsaWYgIlBBWU1FTlRfRVhQSVJFRCIgaW4gZXJyb3JfbWVzc2FnZToKICAgICAgICAgICAgZXJyb3JfdGV4dCA9ICgKICAgICAgICAgICAgICAgIGYi4o+wICoq2KfZhtiq2YfYqiDYtdmE2KfYrdmK2Kkg2KfZhNmF2LnYp9mF2YTYqSEqKlxuXG4iCiAgICAgICAgICAgICAgICBmItmE2Kcg2YrZhdmD2YYg2KXYsdis2KfYuSDYp9mE2YbYrNmI2YUg2YTZhdi52KfZhdmE2KfYqiDYo9mC2K/ZhSDZhdmGIDE4MCDZitmI2YXZi9inLiIKICAgICAgICAgICAgKQogICAgICAgIGVsc2U6CiAgICAgICAgICAgIGVycm9yX3RleHQgPSAoCiAgICAgICAgICAgICAgICBmIuKdjCAqKtmB2LTZhCDYpdix2KzYp9i5INin2YTZhtis2YjZhSEqKlxuXG4iCiAgICAgICAgICAgICAgICBmIioq2KfZhNiu2LfYozoqKiBge2Vycm9yX21lc3NhZ2V9YFxuXG4iCiAgICAgICAgICAgICAgICBmIvCfkaQgVXNlciBJRDogYHt0YXJnZXRfdXNlcl9pZH1gXG4iCiAgICAgICAgICAgICAgICBmIvCfhpQgQ2hhcmdlIElEOiBge2NoYXJnZV9pZH1gIgogICAgICAgICAgICApCiAgICAgICAgCiAgICAgICAgbG9nZ2VyLmVycm9yKGYi2YHYtNmEINin2YTYp9iz2KrYsdiv2KfYrzoge2Vycm9yX21lc3NhZ2V9IikKICAgICAgICBhd2FpdCBsb2FkaW5nX21zZy5lZGl0X3RleHQoZXJyb3JfdGV4dCwgcGFyc2VfbW9kZT0nTWFya2Rvd24nKQoKIyDYqti02LrZitmEINin2YTYqNmI2KoKZGVmIG1haW4oKToKICAgIGluaXRfZGIoKQogICAgCiAgICBhcHBsaWNhdGlvbiA9IEFwcGxpY2F0aW9uLmJ1aWxkZXIoKS50b2tlbihUT0tFTikuYnVpbGQoKQogICAgCiAgICBhcHBsaWNhdGlvbi5hZGRfaGFuZGxlcihDb21tYW5kSGFuZGxlcigic3RhcnQiLCBzdGFydCkpCiAgICBhcHBsaWNhdGlvbi5hZGRfaGFuZGxlcihDb21tYW5kSGFuZGxlcigiYWRtaW4iLCBhZG1pbikpCiAgICBhcHBsaWNhdGlvbi5hZGRfaGFuZGxlcihDb21tYW5kSGFuZGxlcigicmVmdW5kIiwgcmVmdW5kX3N0YXJzKSkKICAgIAogICAgYXBwbGljYXRpb24uYWRkX2hhbmRsZXIoQ2FsbGJhY2tRdWVyeUhhbmRsZXIoYnV0dG9uX2hhbmRsZXIpKQogICAgCiAgICBhcHBsaWNhdGlvbi5hZGRfaGFuZGxlcihNZXNzYWdlSGFuZGxlcihmaWx0ZXJzLlRFWFQgJiB+ZmlsdGVycy5DT01NQU5ELCBtZXNzYWdlX2hhbmRsZXIpKQogICAgCiAgICBhcHBsaWNhdGlvbi5hZGRfaGFuZGxlcihNZXNzYWdlSGFuZGxlcigoZmlsdGVycy5QSE9UTyB8IGZpbHRlcnMuRG9jdW1lbnQuQUxMKSAmIH5maWx0ZXJzLkNPTU1BTkQsIG1lc3NhZ2VfaGFuZGxlcikpCiAgICAKICAgIGFwcGxpY2F0aW9uLmFkZF9oYW5kbGVyKFByZUNoZWNrb3V0UXVlcnlIYW5kbGVyKHByZWNoZWNrb3V0X2NhbGxiYWNrKSkKICAgIGFwcGxpY2F0aW9uLmFkZF9oYW5kbGVyKE1lc3NhZ2VIYW5kbGVyKGZpbHRlcnMuU1VDQ0VTU0ZVTF9QQVlNRU5ULCBzdWNjZXNzZnVsX3BheW1lbnQpKQogICAgCiAgICBwcmludCgi8J+kliDYp9mE2KjZiNiqINmK2LnZhdmEINin2YTYotmGLi4uIikKICAgIHByaW50KGYi4pyFIElEINin2YTZhdi02LHZgToge0FETUlOX0lEfSIpCiAgICAjINiq2YUg2KrYudiv2YrZhNmHINmE2YTYudmF2YQg2YHZiiB0aHJlYWQKCiAgICBpbXBvcnQgYXN5bmNpbwoKICAgIGxvb3AgPSBhc3luY2lvLm5ld19ldmVudF9sb29wKCkKCiAgICBhc3luY2lvLnNldF9ldmVudF9sb29wKGxvb3ApCgogICAgYXN5bmMgZGVmIHJ1bigpOgoKICAgICAgICBhd2FpdCBhcHBsaWNhdGlvbi5pbml0aWFsaXplKCkKCiAgICAgICAgYXdhaXQgYXBwbGljYXRpb24uc3RhcnQoKQoKICAgICAgICBhd2FpdCBhcHBsaWNhdGlvbi51cGRhdGVyLnN0YXJ0X3BvbGxpbmcoKQoKICAgICAgICB0cnk6CgogICAgICAgICAgICB3aGlsZSBUcnVlOgoKICAgICAgICAgICAgICAgIGF3YWl0IGFzeW5jaW8uc2xlZXAoMSkKCiAgICAgICAgZXhjZXB0OgoKICAgICAgICAgICAgcGFzcwoKICAgICAgICBmaW5hbGx5OgoKICAgICAgICAgICAgYXdhaXQgYXBwbGljYXRpb24udXBkYXRlci5zdG9wKCkKCiAgICAgICAgICAgIGF3YWl0IGFwcGxpY2F0aW9uLnN0b3AoKQoKICAgICAgICAgICAgYXdhaXQgYXBwbGljYXRpb24uc2h1dGRvd24oKQoKICAgIGxvb3AucnVuX3VudGlsX2NvbXBsZXRlKHJ1bigpKQoKaWYgX19uYW1lX18gPT0gJ19fbWFpbl9fJzoKICAgIG1haW4oKQ==",
+    2: "aW1wb3J0IHRlbGVncmFtCmZyb20gdGVsZWdyYW0uZXh0IGltcG9ydCBVcGRhdGVyLCBDb21tYW5kSGFuZGxlciwgTWVzc2FnZUhhbmRsZXIsIGZpbHRlcnMKaW1wb3J0IHJlcXVlc3RzCmltcG9ydCBsb2dnaW5nCgojIDEuINil2LnYr9in2K8g2KfZhNiq2LPYrNmK2YQgKNmE2YTYqti12K3ZititINmI2YXYtNin2YfYr9ipINin2YTYo9iu2LfYp9ihKQpsb2dnaW5nLmJhc2ljQ29uZmlnKGZvcm1hdD0nJShhc2N0aW1lKXMgLSAlKG5hbWUpcyAtICUobGV2ZWxuYW1lKXMgLSAlKG1lc3NhZ2UpcycsCiAgICAgICAgICAgICAgICAgICAgbGV2ZWw9bG9nZ2luZy5JTkZPKQoKIyAyLiDYp9mE2KvZiNin2KjYqiDZiNin2YTZhdiq2LrZitix2KfYqgojICEhISDZh9in2YU6INin2LPYqtio2K/ZhCAnWU9VUl9CT1RfVE9LRU4nINio2KfZhNmAIFRva2VuINin2YTYrtin2LUg2KjYqNmI2Kog2KrZhNmK2KzYsdin2YUg2KfZhNiu2KfYtSDYqNmDICEhIQpCT1RfVE9LRU4gPSAnODM0MTE0MTYwODpBQUYxc2t2bG1oY1pmLW9yb25aa0hhWVdFX2FuYnZMZmJpbycKTElOS0pVU1RfQVBJX1RPS0VOID0gJzgxYjZlMTQ3OWNjYzE1OWRkYjNlYWRhZTk3YzUzNmQzZWJlOWUwNzMnCkxJTktKVVNUX0FQSV9VUkwgPSAnaHR0cHM6Ly9saW5ranVzdC5jb20vYXBpJwoKIyAzLiDYr9in2YTYqSDYqNiv2KEg2KfZhNiq2LTYutmK2YQgKC9zdGFydCkKYXN5bmMgZGVmIHN0YXJ0KHVwZGF0ZTogdGVsZWdyYW0uVXBkYXRlLCBjb250ZXh0OiB0ZWxlZ3JhbS5leHQuQ29udGV4dFR5cGVzLkRFRkFVTFRfVFlQRSkgLT4gTm9uZToKICAgICIiItiq2LHYs9mEINix2LPYp9mE2Kkg2KrYsdit2YrYqCDYudmG2K8g2KfYs9iq2K7Yr9in2YUg2KfZhNij2YXYsSAvc3RhcnQuIiIiCiAgICBhd2FpdCB1cGRhdGUubWVzc2FnZS5yZXBseV90ZXh0KAogICAgICAgICfwn5GLINmF2LHYrdio2KfZiyEg2KPZhtinINio2YjYqiDYqtmC2LXZitixINin2YTYsdmI2KfYqNi3LlxuJwogICAgICAgICfYo9ix2LPZhCDZhNmKINin2YTYsdin2KjYtyDYp9mE2LfZiNmK2YQg2KfZhNiw2Yog2KrYsdmK2K8g2KrZgti12YrYsdmHINmI2LPYo9mC2YjZhSDYqNin2YTYqNin2YLZii4nCiAgICApCgojIDQuINiv2KfZhNipINiq2YLYtdmK2LEg2KfZhNix2KfYqNi3CmFzeW5jIGRlZiBzaG9ydGVuX2xpbmsodXBkYXRlOiB0ZWxlZ3JhbS5VcGRhdGUsIGNvbnRleHQ6IHRlbGVncmFtLmV4dC5Db250ZXh0VHlwZXMuREVGQVVMVF9UWVBFKSAtPiBOb25lOgogICAgIiIi2KrZgtmI2YUg2KjYqtmC2LXZitixINin2YTYsdin2KjYtyDYp9mE2YXZj9ix2LPZhCDYqNin2LPYqtiu2K/Yp9mFIEFQSSBMaW5ranVzdC4iIiIKICAgIGxvbmdfdXJsID0gdXBkYXRlLm1lc3NhZ2UudGV4dAogICAgCiAgICAjINio2YbYp9ihINix2KfYqNi3INi32YTYqCBBUEkKICAgIHBheWxvYWQgPSB7CiAgICAgICAgJ2FwaSc6IExJTktKVVNUX0FQSV9UT0tFTiwKICAgICAgICAndXJsJzogbG9uZ191cmwsCiAgICAgICAgJ2Zvcm1hdCc6ICdqc29uJyAgIyDZhti32YTYqCDYp9iz2KrYrNin2KjYqSDYqNi12YrYutipIEpTT04g2YTYs9mH2YjZhNipINin2YTZhdi52KfZhNis2KkKICAgIH0KICAgIAogICAgdHJ5OgogICAgICAgICMg2KXYsdiz2KfZhCDYt9mE2KggR0VUINil2YTZiSBBUEkgTGlua2p1c3QKICAgICAgICByZXNwb25zZSA9IHJlcXVlc3RzLmdldChMSU5LSlVTVF9BUElfVVJMLCBwYXJhbXM9cGF5bG9hZCwgdGltZW91dD0xMCkKICAgICAgICByZXNwb25zZS5yYWlzZV9mb3Jfc3RhdHVzKCkgICMg2YrYsdmB2Lkg2KfYs9iq2KvZhtin2KEgSFRUUEVycm9yINmE2YTYsdiv2YjYryDYp9mE2LPZitim2KkgKDR4eCDYo9mIIDV4eCkKICAgICAgICAKICAgICAgICAjINiq2K3ZhNmK2YQg2KfYs9iq2KzYp9io2KkgSlNPTgogICAgICAgIGRhdGEgPSByZXNwb25zZS5qc29uKCkKICAgICAgICAKICAgICAgICBpZiBkYXRhLmdldCgnc3RhdHVzJykgPT0gJ3N1Y2Nlc3MnOgogICAgICAgICAgICBzaG9ydGVuZWRfdXJsID0gZGF0YS5nZXQoJ3Nob3J0ZW5lZFVybCcpCiAgICAgICAgICAgIGF3YWl0IHVwZGF0ZS5tZXNzYWdlLnJlcGx5X3RleHQoCiAgICAgICAgICAgICAgICBmJ+KchSDYqtmFINiq2YLYtdmK2LEg2KfZhNix2KfYqNi3INio2YbYrNin2K06XG5cbmB7c2hvcnRlbmVkX3VybH1gJywKICAgICAgICAgICAgICAgIHBhcnNlX21vZGU9dGVsZWdyYW0uY29uc3RhbnRzLlBhcnNlTW9kZS5NQVJLRE9XTl9WMgogICAgICAgICAgICApCiAgICAgICAgZWxpZiBkYXRhLmdldCgnc3RhdHVzJykgPT0gJ2Vycm9yJzoKICAgICAgICAgICAgZXJyb3JfbWVzc2FnZSA9IGRhdGEuZ2V0KCdtZXNzYWdlJywgJ9it2K/YqyDYrti32KMg2LrZitixINmF2LnYsdmI2YEg2KPYq9mG2KfYoSDYqtmC2LXZitixINin2YTYsdin2KjYty4nKQogICAgICAgICAgICBhd2FpdCB1cGRhdGUubWVzc2FnZS5yZXBseV90ZXh0KGYn4p2MINiu2LfYoyDZgdmKIEFQSSBMaW5ranVzdDoge2Vycm9yX21lc3NhZ2V9JykKICAgICAgICBlbHNlOgogICAgICAgICAgICAgYXdhaXQgdXBkYXRlLm1lc3NhZ2UucmVwbHlfdGV4dCgn4pqg77iPINin2LPYqtis2KfYqNipINi62YrYsSDZhdiq2YjZgti52Kkg2YXZhiBBUEkgTGlua2p1c3QuJykKCiAgICBleGNlcHQgcmVxdWVzdHMuZXhjZXB0aW9ucy5SZXF1ZXN0RXhjZXB0aW9uIGFzIGU6CiAgICAgICAgIyDYp9mE2KrYudin2YXZhCDZhdi5INij2K7Yt9in2KEg2KfZhNi02KjZg9ipINmI2KfZhNi32YTYqNin2KogKNmF2KvZhCBUaW1lb3V0INij2Ygg2KfZhNin2KrYtdin2YQpCiAgICAgICAgbG9nZ2luZy5lcnJvcihmIkVycm9yIGNvbm5lY3RpbmcgdG8gTGlua2p1c3QgQVBJOiB7ZX0iKQogICAgICAgIGF3YWl0IHVwZGF0ZS5tZXNzYWdlLnJlcGx5X3RleHQoJ+KdjCDYudiw2LHYp9mL2Iwg2K3Yr9irINiu2LfYoyDYo9ir2YbYp9ihINmF2K3Yp9mI2YTYqSDYp9mE2KfYqti12KfZhCDYqNiu2K/ZhdipINiq2YLYtdmK2LEg2KfZhNix2YjYp9io2LcuJykKICAgIGV4Y2VwdCBFeGNlcHRpb24gYXMgZToKICAgICAgICAjINin2YTYqti52KfZhdmEINmF2Lkg2KPYrti32KfYoSDYo9iu2LHZiSAo2YXYq9mEINiu2LfYoyDZgdmKINiq2K3ZhNmK2YQgSlNPTikKICAgICAgICBsb2dnaW5nLmVycm9yKGYiQW4gdW5leHBlY3RlZCBlcnJvciBvY2N1cnJlZDoge2V9IikKICAgICAgICBhd2FpdCB1cGRhdGUubWVzc2FnZS5yZXBseV90ZXh0KCfinYwg2K3Yr9irINiu2LfYoyDYutmK2LEg2YXYqtmI2YLYuS4g2YrYsdis2Ykg2KfZhNmF2K3Yp9mI2YTYqSDZhNin2K3Zgtin2YsuJykKCiMgNS4g2K/Yp9mE2Kkg2KfZhNiq2LTYutmK2YQg2KfZhNix2KbZitiz2YrYqQpkZWYgbWFpbigpIC0+IE5vbmU6CiAgICAiIiLYqtio2K/YoyDYqti02LrZitmEINin2YTYqNmI2KouIiIiCiAgICAKICAgICMg2KXZhti02KfYoSBVcGRhdGVyINmI2KrZhdix2YrYsSDYp9mE2YAgVG9rZW4g2KfZhNiu2KfYtSDYqNin2YTYqNmI2KoKICAgICMg2KfYs9iq2K7Yr9mFINin2YTZgCBBUEkg2KfZhNiu2KfYtSDYqNmAIFRlbGVncmFtCiAgICBhcHBsaWNhdGlvbiA9IHRlbGVncmFtLmV4dC5BcHBsaWNhdGlvbi5idWlsZGVyKCkudG9rZW4oQk9UX1RPS0VOKS5idWlsZCgpCiAgICAKICAgICMg2KXYttin2YHYqSDZhdi52KfZhNis2KfYqiDYp9mE2KPZiNin2YXYsSDZiNin2YTYsdiz2KfYptmECiAgICAjINmF2LnYp9mE2Kwg2KfZhNij2YXYsSAvc3RhcnQKICAgIGFwcGxpY2F0aW9uLmFkZF9oYW5kbGVyKENvbW1hbmRIYW5kbGVyKCJzdGFydCIsIHN0YXJ0KSkKICAgIAogICAgIyDZhdi52KfZhNisINin2YTYsdiz2KfYptmEINin2YTZhti12YrYqSDYutmK2LEg2KfZhNij2YjYp9mF2LEKICAgICMg2LPZitiq2YUg2KfYs9iq2K7Yr9in2YXZhyDZhNiq2YLYtdmK2LEg2KPZiiDZhti1ICjZitmB2KrYsdi2INij2YbZhyDYsdin2KjYtykg2YrZj9ix2LPZhNmHINin2YTZhdiz2KrYrtiv2YUKICAgIGFwcGxpY2F0aW9uLmFkZF9oYW5kbGVyKE1lc3NhZ2VIYW5kbGVyKGZpbHRlcnMuVEVYVCAmIH5maWx0ZXJzLkNPTU1BTkQsIHNob3J0ZW5fbGluaykpCgogICAgIyDYqNiv2KEg2KrYtNi62YrZhCDYp9mE2KjZiNiqICjYp9mE2YjYtti5IFBvbGxpbmcpCiAgICBwcmludCgi2KfZhNio2YjYqiDZiti52YXZhC4uLiIpCiAgICAjINiq2YUg2KrYudiv2YrZhNmHINmE2YTYudmF2YQg2YHZiiB0aHJlYWQKCiAgICBpbXBvcnQgYXN5bmNpbwoKICAgIGxvb3AgPSBhc3luY2lvLm5ld19ldmVudF9sb29wKCkKCiAgICBhc3luY2lvLnNldF9ldmVudF9sb29wKGxvb3ApCgogICAgYXN5bmMgZGVmIHJ1bigpOgoKICAgICAgICBhd2FpdCBhcHBsaWNhdGlvbi5pbml0aWFsaXplKCkKCiAgICAgICAgYXdhaXQgYXBwbGljYXRpb24uc3RhcnQoKQoKICAgICAgICBhd2FpdCBhcHBsaWNhdGlvbi51cGRhdGVyLnN0YXJ0X3BvbGxpbmcoKQoKICAgICAgICB0cnk6CgogICAgICAgICAgICB3aGlsZSBUcnVlOgoKICAgICAgICAgICAgICAgIGF3YWl0IGFzeW5jaW8uc2xlZXAoMSkKCiAgICAgICAgZXhjZXB0OgoKICAgICAgICAgICAgcGFzcwoKICAgICAgICBmaW5hbGx5OgoKICAgICAgICAgICAgYXdhaXQgYXBwbGljYXRpb24udXBkYXRlci5zdG9wKCkKCiAgICAgICAgICAgIGF3YWl0IGFwcGxpY2F0aW9uLnN0b3AoKQoKICAgICAgICAgICAgYXdhaXQgYXBwbGljYXRpb24uc2h1dGRvd24oKQoKICAgIGxvb3AucnVuX3VudGlsX2NvbXBsZXRlKHJ1bigpKQoKaWYgX19uYW1lX18gPT0gJ19fbWFpbl9fJzoKICAgIG1haW4oKQogICAg",
+}
+
+# أسماء البوتات
+BOTS_NAMES = {
+    1: "1.py",
+    2: "2.py",
+}
+
+# تبعيات كل بوت
+BOTS_IMPORTS = {
+}
+
+def load_helper_files(bot_num):
+    """تحميل الملفات المساعدة التي يحتاجها البوت"""
+    if bot_num not in BOTS_IMPORTS:
+        return
     
-    async def init_db(self):
-        """إنشاء الجداول الأساسية"""
-        async with aiosqlite.connect(self.db_name) as db:
-            # جدول المسابقات
-            await db.execute('''
-                CREATE TABLE IF NOT EXISTS contests (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    owner_id INTEGER NOT NULL,
-                    channel_id TEXT NOT NULL,
-                    contest_type TEXT NOT NULL,
-                    status TEXT DEFAULT 'active',
-                    settings TEXT,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    ended_at TIMESTAMP
-                )
-            ''')
-            
-            # جدول المتسابقين في مسابقة التصويت
-            await db.execute('''
-                CREATE TABLE IF NOT EXISTS voting_participants (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    contest_id INTEGER,
-                    name TEXT NOT NULL,
-                    message_id INTEGER,
-                    votes INTEGER DEFAULT 0,
-                    FOREIGN KEY(contest_id) REFERENCES contests(id)
-                )
-            ''')
-            
-            # جدول الأصوات
-            await db.execute('''
-                CREATE TABLE IF NOT EXISTS votes (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    participant_id INTEGER,
-                    user_id INTEGER,
-                    voted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY(participant_id) REFERENCES voting_participants(id)
-                )
-            ''')
-            
-            # جدول المشتركين في عجلة الحظ
-            await db.execute('''
-                CREATE TABLE IF NOT EXISTS lucky_participants (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    contest_id INTEGER,
-                    user_id INTEGER,
-                    username TEXT,
-                    joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY(contest_id) REFERENCES contests(id)
-                )
-            ''')
-            
-            # حذف الجدول القديم إذا كان موجوداً بالقيد الخاطئ
+    for module_name in BOTS_IMPORTS[bot_num]:
+        if module_name in HELPER_FILES:
             try:
-                # محاولة التحقق من البنية
-                async with db.execute("PRAGMA table_info(referral_participants)") as cursor:
-                    columns = await cursor.fetchall()
-                    # التحقق إذا كان user_id لديه قيد UNIQUE خاطئ
-                    needs_recreation = False
-                    async with db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='referral_participants'") as cursor:
-                        result = await cursor.fetchone()
-                        if result and 'user_id INTEGER UNIQUE' in result[0]:
-                            needs_recreation = True
-                    
-                    if needs_recreation:
-                        # نسخ البيانات القديمة
-                        await db.execute('''
-                            CREATE TABLE IF NOT EXISTS referral_participants_backup AS 
-                            SELECT * FROM referral_participants
-                        ''')
-                        
-                        # حذف الجدول القديم
-                        await db.execute('DROP TABLE IF EXISTS referral_participants')
-            except:
-                pass
-            
-            # جدول مسابقة الإحالات
-            await db.execute('''
-                CREATE TABLE IF NOT EXISTS referral_participants (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    contest_id INTEGER,
-                    user_id INTEGER,
-                    username TEXT,
-                    referral_code TEXT UNIQUE,
-                    referred_by INTEGER,
-                    referral_count INTEGER DEFAULT 0,
-                    message_id INTEGER,
-                    joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    UNIQUE(contest_id, user_id),
-                    FOREIGN KEY(contest_id) REFERENCES contests(id)
-                )
-            ''')
-            
-            # محاولة استرجاع البيانات القديمة
-            try:
-                async with db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='referral_participants_backup'") as cursor:
-                    if await cursor.fetchone():
-                        await db.execute('''
-                            INSERT OR IGNORE INTO referral_participants 
-                            SELECT * FROM referral_participants_backup
-                        ''')
-                        await db.execute('DROP TABLE referral_participants_backup')
-            except:
-                pass
-            
-            # جدول التحقق من الاشتراك
-            await db.execute('''
-                CREATE TABLE IF NOT EXISTS subscription_checks (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_id INTEGER,
-                    channel_id TEXT,
-                    is_subscribed INTEGER DEFAULT 1,
-                    last_check TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            ''')
-            
-            await db.commit()
-    
-    async def create_contest(self, owner_id: int, channel_id: str, 
-                           contest_type: str, settings: dict) -> int:
-        """إنشاء مسابقة جديدة"""
-        async with aiosqlite.connect(self.db_name) as db:
-            cursor = await db.execute('''
-                INSERT INTO contests (owner_id, channel_id, contest_type, settings)
-                VALUES (?, ?, ?, ?)
-            ''', (owner_id, channel_id, contest_type, json.dumps(settings)))
-            await db.commit()
-            return cursor.lastrowid
-    
-    async def get_contest(self, contest_id: int) -> Optional[dict]:
-        """الحصول على معلومات مسابقة"""
-        async with aiosqlite.connect(self.db_name) as db:
-            db.row_factory = aiosqlite.Row
-            async with db.execute(
-                'SELECT * FROM contests WHERE id = ?', (contest_id,)
-            ) as cursor:
-                row = await cursor.fetchone()
-                if row:
-                    return dict(row)
-                return None
-    
-    async def get_active_contests_by_owner(self, owner_id: int) -> List[dict]:
-        """الحصول على جميع المسابقات النشطة للمستخدم"""
-        async with aiosqlite.connect(self.db_name) as db:
-            db.row_factory = aiosqlite.Row
-            async with db.execute('''
-                SELECT * FROM contests 
-                WHERE owner_id = ? AND status = 'active'
-            ''', (owner_id,)) as cursor:
-                return [dict(row) for row in await cursor.fetchall()]
-    
-    async def end_contest(self, contest_id: int):
-        """إنهاء المسابقة"""
-        async with aiosqlite.connect(self.db_name) as db:
-            await db.execute('''
-                UPDATE contests 
-                SET status = 'ended', ended_at = CURRENT_TIMESTAMP
-                WHERE id = ?
-            ''', (contest_id,))
-            await db.commit()
+                # فك التشفير
+                code = base64.b64decode(HELPER_FILES[module_name]).decode("utf-8")
+                
+                # إنشاء module
+                module = types.ModuleType(module_name)
+                
+                # تنفيذ الكود
+                exec(code, module.__dict__)
+                
+                # إضافة للنظام
+                sys.modules[module_name] = module
+                
+                print(f"      ✓ تم تحميل {module_name}")
+            except Exception as e:
+                print(f"      ❌ خطأ في تحميل {module_name}: {e}")
 
-# ═══════════════════════════════════════════════════════════════
-# 🔍 وظائف التحقق من الاشتراك
-# ═══════════════════════════════════════════════════════════════
-
-async def check_user_subscription(
-    context: ContextTypes.DEFAULT_TYPE,
-    user_id: int,
-    channel_id: str
-) -> bool:
-    """التحقق من اشتراك المستخدم في القناة"""
+def run_bot(bot_num):
+    bot_name = BOTS_NAMES[bot_num]
+    print(f"\n🤖 تشغيل: {bot_name}")
+    bots_status[bot_num] = {"name": bot_name, "status": "starting"}
     try:
-        # إزالة @ إذا كان موجوداً
-        clean_channel_id = channel_id.replace('@', '')
-        
-        # محاولة مع @
-        try:
-            member = await context.bot.get_chat_member(f"@{clean_channel_id}", user_id)
-            return member.status in [
-                ChatMemberStatus.MEMBER,
-                ChatMemberStatus.ADMINISTRATOR,
-                ChatMemberStatus.OWNER
-            ]
-        except TelegramError as e:
-            # إذا فشل، جرب بدون @
-            if 'Chat not found' in str(e) or 'Bad Request' in str(e):
-                try:
-                    member = await context.bot.get_chat_member(clean_channel_id, user_id)
-                    return member.status in [
-                        ChatMemberStatus.MEMBER,
-                        ChatMemberStatus.ADMINISTRATOR,
-                        ChatMemberStatus.OWNER
-                    ]
-                except TelegramError:
-                    return False
-            return False
-    except Exception:
-        return False
-
-async def check_multiple_subscriptions(
-    context: ContextTypes.DEFAULT_TYPE,
-    user_id: int,
-    channels: List[str]
-) -> Tuple[bool, List[str]]:
-    """التحقق من اشتراك المستخدم في عدة قنوات"""
-    not_subscribed = []
-    
-    for channel in channels:
-        # تجاهل القنوات الفارغة
-        if not channel or channel.strip() == '':
-            continue
-            
-        is_subscribed = await check_user_subscription(context, user_id, channel)
-        if not is_subscribed:
-            not_subscribed.append(channel)
-    
-    return len(not_subscribed) == 0, not_subscribed
-
-# ═══════════════════════════════════════════════════════════════
-# 🗳️ مسابقة التصويت (Voting Contest)
-# ═══════════════════════════════════════════════════════════════
-
-class VotingContest:
-    """إدارة مسابقة التصويت"""
-    
-    def __init__(self, db: Database):
-        self.db = db
-    
-    async def create(self, owner_id: int, channel_id: str, 
-                    participants: List[str]) -> int:
-        """إنشاء مسابقة تصويت"""
-        settings = {
-            'check_interval_hours': CHECK_SUBSCRIPTION_INTERVAL
-        }
-        contest_id = await self.db.create_contest(
-            owner_id, channel_id, 'voting', settings
-        )
-        
-        # إضافة المتسابقين إذا كانوا موجودين
-        if participants:
-            async with aiosqlite.connect(self.db.db_name) as db:
-                for name in participants:
-                    await db.execute('''
-                        INSERT INTO voting_participants (contest_id, name)
-                        VALUES (?, ?)
-                    ''', (contest_id, name))
-                await db.commit()
-        
-        return contest_id
-    
-    async def publish_participants(
-        self,
-        context: ContextTypes.DEFAULT_TYPE,
-        contest_id: int,
-        channel_id: str
-    ):
-        """نشر المتسابقين في القناة"""
-        async with aiosqlite.connect(self.db.db_name) as db:
-            db.row_factory = aiosqlite.Row
-            async with db.execute('''
-                SELECT * FROM voting_participants WHERE contest_id = ?
-            ''', (contest_id,)) as cursor:
-                participants = await cursor.fetchall()
-        
-        for participant in participants:
-            keyboard = [[
-                InlineKeyboardButton(
-                    "❤️ صوّت", 
-                    callback_data=f"vote_{participant['id']}"
-                )
-            ]]
-            
-            message = await context.bot.send_message(
-                chat_id=channel_id,
-                text=f"🎯 المتسابق: {participant['name']}\n\n"
-                     f"❤️ عدد الأصوات: 0",
-                reply_markup=InlineKeyboardMarkup(keyboard)
-            )
-            
-            # حفظ معرف الرسالة
-            async with aiosqlite.connect(self.db.db_name) as db:
-                await db.execute('''
-                    UPDATE voting_participants 
-                    SET message_id = ? 
-                    WHERE id = ?
-                ''', (message.message_id, participant['id']))
-                await db.commit()
-    
-    async def handle_vote(
-        self,
-        update: Update,
-        context: ContextTypes.DEFAULT_TYPE
-    ):
-        """معالجة التصويت"""
-        query = update.callback_query
-        
-        participant_id = int(query.data.split('_')[1])
-        user_id = query.from_user.id
-        
-        # الحصول على معلومات المسابقة
-        async with aiosqlite.connect(self.db.db_name) as db:
-            db.row_factory = aiosqlite.Row
-            async with db.execute('''
-                SELECT vp.*, c.channel_id, c.status
-                FROM voting_participants vp
-                JOIN contests c ON vp.contest_id = c.id
-                WHERE vp.id = ?
-            ''', (participant_id,)) as cursor:
-                participant = await cursor.fetchone()
-        
-        if not participant or participant['status'] != 'active':
-            await query.answer("❌ المسابقة منتهية!", show_alert=True)
-            return
-        
-        channel_id = participant['channel_id']
-        
-        # التحقق من الاشتراك في القناتين
-        channels_to_check = [OFFICIAL_CHANNEL, channel_id]
-        not_subscribed = []
-        
-        for channel in channels_to_check:
-            is_subscribed = await check_user_subscription(context, user_id, channel)
-            if not is_subscribed:
-                not_subscribed.append(channel)
-        
-        if not_subscribed:
-            # إنشاء أزرار الاشتراك
-            keyboard = []
-            for channel in not_subscribed:
-                keyboard.append([
-                    InlineKeyboardButton(
-                        f"📢 اشترك في {channel}",
-                        url=f"https://t.me/{channel.replace('@', '')}"
-                    )
-                ])
-            
-            keyboard.append([
-                InlineKeyboardButton(
-                    "✅ تحقق من الاشتراك",
-                    callback_data=f"check_vote_{participant_id}"
-                )
-            ])
-            
-            await query.answer()
-            await context.bot.send_message(
-                chat_id=user_id,
-                text="⚠️ *يجب الاشتراك في القنوات التالية للتصويت:*\n\n"
-                     "اضغط على الأزرار أدناه للاشتراك، ثم اضغط 'تحقق من الاشتراك'",
-                reply_markup=InlineKeyboardMarkup(keyboard),
-                parse_mode=ParseMode.MARKDOWN
-            )
-            return
-        
-        # التحقق من عدم التصويت سابقاً
-        async with aiosqlite.connect(self.db.db_name) as db:
-            async with db.execute('''
-                SELECT id FROM votes 
-                WHERE participant_id = ? AND user_id = ?
-            ''', (participant_id, user_id)) as cursor:
-                existing_vote = await cursor.fetchone()
-        
-        if existing_vote:
-            await query.answer("✅ لقد صوّت بالفعل!", show_alert=True)
-            return
-        
-        # إضافة الصوت
-        async with aiosqlite.connect(self.db.db_name) as db:
-            await db.execute('''
-                INSERT INTO votes (participant_id, user_id)
-                VALUES (?, ?)
-            ''', (participant_id, user_id))
-            
-            await db.execute('''
-                UPDATE voting_participants 
-                SET votes = votes + 1 
-                WHERE id = ?
-            ''', (participant_id,))
-            
-            await db.commit()
-            
-            # الحصول على عدد الأصوات الجديد
-            async with db.execute('''
-                SELECT votes FROM voting_participants WHERE id = ?
-            ''', (participant_id,)) as cursor:
-                new_votes = (await cursor.fetchone())[0]
-        
-        # تحديث الرسالة
-        try:
-            await context.bot.edit_message_text(
-                chat_id=channel_id,
-                message_id=participant['message_id'],
-                text=f"🎯 المتسابق: {participant['name']}\n\n"
-                     f"❤️ عدد الأصوات: {new_votes}",
-                reply_markup=query.message.reply_markup
-            )
-        except TelegramError:
-            pass
-        
-        await query.answer("✅ تم التصويت بنجاح!", show_alert=True)
-        
-        # حفظ معلومات التحقق من الاشتراك
-        async with aiosqlite.connect(self.db.db_name) as db:
-            await db.execute('''
-                INSERT OR REPLACE INTO subscription_checks 
-                (user_id, channel_id, is_subscribed)
-                VALUES (?, ?, 1)
-            ''', (user_id, channel_id))
-            await db.commit()
-    
-    async def check_subscriptions_task(
-        self,
-        context: ContextTypes.DEFAULT_TYPE
-    ):
-        """مهمة دورية للتحقق من الاشتراكات"""
-        async with aiosqlite.connect(self.db.db_name) as db:
-            db.row_factory = aiosqlite.Row
-            
-            # الحصول على جميع الأصوات النشطة
-            async with db.execute('''
-                SELECT v.*, vp.contest_id, c.channel_id
-                FROM votes v
-                JOIN voting_participants vp ON v.participant_id = vp.id
-                JOIN contests c ON vp.contest_id = c.id
-                WHERE c.status = 'active'
-            ''') as cursor:
-                votes = await cursor.fetchall()
-        
-        for vote in votes:
-            user_id = vote['user_id']
-            channel_id = vote['channel_id']
-            
-            # التحقق من الاشتراك
-            is_subscribed = await check_user_subscription(
-                context, user_id, channel_id
-            )
-            
-            if not is_subscribed:
-                # حذف الصوت
-                async with aiosqlite.connect(self.db.db_name) as db:
-                    await db.execute(
-                        'DELETE FROM votes WHERE id = ?',
-                        (vote['id'],)
-                    )
-                    await db.execute('''
-                        UPDATE voting_participants 
-                        SET votes = votes - 1 
-                        WHERE id = ?
-                    ''', (vote['participant_id'],))
-                    await db.commit()
-                
-                logger.info(
-                    f"Removed vote from user {user_id} "
-                    f"for leaving channel {channel_id}"
-                )
-    
-    async def end_contest(
-        self,
-        context: ContextTypes.DEFAULT_TYPE,
-        contest_id: int
-    ):
-        """إنهاء المسابقة ونشر النتائج"""
-        contest = await self.db.get_contest(contest_id)
-        if not contest:
-            return
-        
-        channel_id = contest['channel_id']
-        
-        logger.info(f"Starting final subscription check for voting contest {contest_id}")
-        
-        # الفحص النهائي: حذف جميع الأصوات من المستخدمين غير المشتركين
-        async with aiosqlite.connect(self.db.db_name) as db:
-            db.row_factory = aiosqlite.Row
-            
-            # الحصول على جميع الأصوات
-            async with db.execute('''
-                SELECT DISTINCT v.user_id, v.participant_id
-                FROM votes v
-                JOIN voting_participants vp ON v.participant_id = vp.id
-                WHERE vp.contest_id = ?
-            ''', (contest_id,)) as cursor:
-                all_votes = await cursor.fetchall()
-        
-        # التحقق من اشتراك كل مصوت
-        removed_votes_count = 0
-        for vote in all_votes:
-            user_id = vote['user_id']
-            
-            # التحقق من الاشتراك في القناتين
-            channels = [OFFICIAL_CHANNEL, channel_id]
-            is_subscribed, _ = await check_multiple_subscriptions(
-                context, user_id, channels
-            )
-            
-            if not is_subscribed:
-                # حذف الصوت
-                async with aiosqlite.connect(self.db.db_name) as db:
-                    await db.execute('''
-                        DELETE FROM votes 
-                        WHERE user_id = ? AND participant_id = ?
-                    ''', (user_id, vote['participant_id']))
-                    
-                    await db.execute('''
-                        UPDATE voting_participants 
-                        SET votes = votes - 1 
-                        WHERE id = ?
-                    ''', (vote['participant_id'],))
-                    
-                    await db.commit()
-                
-                removed_votes_count += 1
-                logger.info(f"Removed vote from user {user_id} (not subscribed)")
-        
-        if removed_votes_count > 0:
-            logger.info(f"Removed {removed_votes_count} votes from unsubscribed users")
-        
-        # الحصول على جميع المتسابقين مع message_id والأصوات النهائية
-        async with aiosqlite.connect(self.db.db_name) as db:
-            db.row_factory = aiosqlite.Row
-            async with db.execute('''
-                SELECT name, votes, message_id
-                FROM voting_participants 
-                WHERE contest_id = ?
-                ORDER BY votes DESC
-            ''', (contest_id,)) as cursor:
-                results = await cursor.fetchall()
-        
-        # حذف أزرار التصويت من جميع المنشورات
-        for result in results:
-            if result['message_id']:
-                try:
-                    await context.bot.edit_message_text(
-                        chat_id=channel_id,
-                        message_id=result['message_id'],
-                        text=f"🎯 المتسابق: {result['name']}\n\n"
-                             f"❤️ عدد الأصوات النهائي: {result['votes']}"
-                    )
-                except TelegramError:
-                    pass
-        
-        # تنسيق النتائج
-        results_text = "🏆 *انتهت المسابقة!*\n\n"
-        results_text += "📊 *النتائج النهائية:*\n\n"
-        
-        for i, result in enumerate(results, 1):
-            medal = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else "▫️"
-            results_text += (
-                f"{medal} {result['name']}: "
-                f"{result['votes']} صوت\n"
-            )
-        
-        # نشر النتائج
-        await context.bot.send_message(
-            chat_id=channel_id,
-            text=results_text,
-            parse_mode=ParseMode.MARKDOWN
-        )
-        
-        # إنهاء المسابقة في قاعدة البيانات
-        await self.db.end_contest(contest_id)
-        
-        logger.info(f"Voting contest {contest_id} ended successfully")
-
-# ═══════════════════════════════════════════════════════════════
-# 🎰 عجلة الحظ (Lucky Wheel)
-# ═══════════════════════════════════════════════════════════════
-
-class LuckyWheelContest:
-    """إدارة مسابقة عجلة الحظ"""
-    
-    def __init__(self, db: Database):
-        self.db = db
-    
-    async def create(
-        self,
-        owner_id: int,
-        channel_id: str,
-        max_participants: int,
-        winners_count: int,
-        custom_message: str = None
-    ) -> int:
-        """إنشاء مسابقة عجلة حظ"""
-        settings = {
-            'max_participants': max_participants,
-            'winners_count': winners_count,
-            'custom_message': custom_message or ""
-        }
-        
-        contest_id = await self.db.create_contest(
-            owner_id, channel_id, 'lucky_wheel', settings
-        )
-        
-        return contest_id
-    
-    async def publish_contest(
-        self,
-        context: ContextTypes.DEFAULT_TYPE,
-        contest_id: int,
-        channel_id: str,
-        max_participants: int,
-        custom_message: str = None
-    ) -> int:
-        """نشر مسابقة عجلة الحظ"""
-        keyboard = [[
-            InlineKeyboardButton(
-                "🎫 الانضمام للمسابقة",
-                callback_data=f"lucky_join_{contest_id}"
-            )
-        ]]
-        
-        # النص الأساسي
-        base_text = f"🎰 *مسابقة عجلة الحظ!*\n\n"
-        
-        # إضافة النص المخصص إذا وجد
-        if custom_message:
-            base_text += f"{custom_message}\n\n"
-        
-        base_text += f"👥 المشتركون: 0/{max_participants}\n\n"
-        base_text += "اضغط للانضمام والحصول على فرصتك!"
-        
-        message = await context.bot.send_message(
-            chat_id=channel_id,
-            text=base_text,
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode=ParseMode.MARKDOWN
-        )
-        
-        # حفظ معرف الرسالة
-        async with aiosqlite.connect(self.db.db_name) as db:
-            await db.execute('''
-                UPDATE contests 
-                SET settings = json_set(settings, '$.message_id', ?)
-                WHERE id = ?
-            ''', (message.message_id, contest_id))
-            await db.commit()
-        
-        return message.message_id
-    
-    async def handle_join(
-        self,
-        update: Update,
-        context: ContextTypes.DEFAULT_TYPE
-    ):
-        """معالجة الانضمام للمسابقة"""
-        query = update.callback_query
-        
-        contest_id = int(query.data.split('_')[2])
-        user_id = query.from_user.id
-        username = query.from_user.username or f"user_{user_id}"
-        
-        # الحصول على معلومات المسابقة
-        contest = await self.db.get_contest(contest_id)
-        if not contest or contest['status'] != 'active':
-            await query.answer("❌ المسابقة منتهية!", show_alert=True)
-            return
-        
-        channel_id = contest['channel_id']
-        settings = json.loads(contest['settings'])
-        max_participants = settings['max_participants']
-        
-        # التحقق من الاشتراك في قناة المسابقة فقط (بدون القناة الرسمية)
-        is_subscribed = await check_user_subscription(context, user_id, channel_id)
-        
-        if not is_subscribed:
-            await query.answer(
-                f"⚠️ يجب الاشتراك في القناة {channel_id} للانضمام!",
-                show_alert=True
-            )
-            return
-        
-        # التحقق من عدم الانضمام سابقاً
-        async with aiosqlite.connect(self.db.db_name) as db:
-            async with db.execute('''
-                SELECT id FROM lucky_participants 
-                WHERE contest_id = ? AND user_id = ?
-            ''', (contest_id, user_id)) as cursor:
-                existing = await cursor.fetchone()
-        
-        if existing:
-            await query.answer("✅ أنت مشترك بالفعل في المسابقة!", show_alert=True)
-            return
-        
-        # الحصول على عدد المشتركين الحالي
-        async with aiosqlite.connect(self.db.db_name) as db:
-            async with db.execute('''
-                SELECT COUNT(*) FROM lucky_participants 
-                WHERE contest_id = ?
-            ''', (contest_id,)) as cursor:
-                current_count = (await cursor.fetchone())[0]
-        
-        if current_count >= max_participants:
-            await query.answer(
-                "❌ المسابقة مكتملة! العدد الأقصى تم الوصول إليه",
-                show_alert=True
-            )
-            return
-        
-        # إضافة المشترك
-        async with aiosqlite.connect(self.db.db_name) as db:
-            await db.execute('''
-                INSERT INTO lucky_participants (contest_id, user_id, username)
-                VALUES (?, ?, ?)
-            ''', (contest_id, user_id, username))
-            await db.commit()
-        
-        new_count = current_count + 1
-        
-        # تحديث الرسالة
-        try:
-            message_id = settings.get('message_id')
-            custom_message = settings.get('custom_message', '')
-            
-            if message_id:
-                # النص الأساسي
-                base_text = f"🎰 *مسابقة عجلة الحظ!*\n\n"
-                
-                # إضافة النص المخصص إذا وجد
-                if custom_message:
-                    base_text += f"{custom_message}\n\n"
-                
-                base_text += f"👥 المشتركون: {new_count}/{max_participants}\n\n"
-                base_text += "اضغط للانضمام والحصول على فرصتك!"
-                
-                await context.bot.edit_message_text(
-                    chat_id=channel_id,
-                    message_id=message_id,
-                    text=base_text,
-                    reply_markup=query.message.reply_markup,
-                    parse_mode=ParseMode.MARKDOWN
-                )
-        except TelegramError:
-            pass
-        
-        await query.answer("✅ تم الانضمام بنجاح! حظاً موفقاً 🍀", show_alert=True)
-        
-        # إذا اكتمل العدد، إجراء السحب تلقائياً
-        if new_count >= max_participants:
-            await self.draw_winners(context, contest_id)
-    
-    async def draw_winners(
-        self,
-        context: ContextTypes.DEFAULT_TYPE,
-        contest_id: int
-    ):
-        """إجراء السحب واختيار الفائزين"""
-        contest = await self.db.get_contest(contest_id)
-        if not contest:
-            return
-        
-        settings = json.loads(contest['settings'])
-        winners_count = settings['winners_count']
-        channel_id = contest['channel_id']
-        
-        logger.info(f"Starting final subscription check for lucky wheel contest {contest_id}")
-        
-        # الفحص النهائي: حذف المشتركين غير المشتركين في القناة
-        async with aiosqlite.connect(self.db.db_name) as db:
-            db.row_factory = aiosqlite.Row
-            async with db.execute('''
-                SELECT user_id, username 
-                FROM lucky_participants 
-                WHERE contest_id = ?
-            ''', (contest_id,)) as cursor:
-                all_participants = await cursor.fetchall()
-        
-        # التحقق من اشتراك كل مشارك
-        removed_count = 0
-        valid_participants = []
-        
-        for participant in all_participants:
-            user_id = participant['user_id']
-            
-            # التحقق من الاشتراك في القناتين
-            channels = [OFFICIAL_CHANNEL, channel_id]
-            is_subscribed, _ = await check_multiple_subscriptions(
-                context, user_id, channels
-            )
-            
-            if is_subscribed:
-                valid_participants.append(participant)
-            else:
-                # حذف المشترك
-                async with aiosqlite.connect(self.db.db_name) as db:
-                    await db.execute('''
-                        DELETE FROM lucky_participants 
-                        WHERE contest_id = ? AND user_id = ?
-                    ''', (contest_id, user_id))
-                    await db.commit()
-                
-                removed_count += 1
-                logger.info(f"Removed participant {user_id} (not subscribed)")
-        
-        if removed_count > 0:
-            logger.info(f"Removed {removed_count} participants from unsubscribed users")
-        
-        # اختيار الفائزين من المشتركين الصالحين فقط
-        if not valid_participants:
-            await context.bot.send_message(
-                chat_id=channel_id,
-                text="❌ لا يوجد مشتركون صالحون للسحب!",
-                parse_mode=ParseMode.MARKDOWN
-            )
-            await self.db.end_contest(contest_id)
-            return
-        
-        winners = random.sample(
-            valid_participants,
-            min(winners_count, len(valid_participants))
-        )
-        
-        # تنسيق النتائج
-        results_text = "🎊 *نتائج السحب!*\n\n"
-        results_text += "🏆 *الفائزون:*\n\n"
-        
-        for i, winner in enumerate(winners, 1):
-            username = winner['username']
-            user_id = winner['user_id']
-            
-            if username.startswith('user_'):
-                results_text += f"{i}. ID: `{user_id}`\n"
-            else:
-                results_text += f"{i}. @{username} (ID: `{user_id}`)\n"
-        
-        results_text += "\n🎉 مبروك للفائزين!"
-        
-        # نشر النتائج
-        try:
-            message_id = settings.get('message_id')
-            if message_id:
-                await context.bot.edit_message_text(
-                    chat_id=channel_id,
-                    message_id=message_id,
-                    text=results_text,
-                    parse_mode=ParseMode.MARKDOWN
-                )
-        except TelegramError:
-            await context.bot.send_message(
-                chat_id=channel_id,
-                text=results_text,
-                parse_mode=ParseMode.MARKDOWN
-            )
-        
-        # إنهاء المسابقة
-        await self.db.end_contest(contest_id)
-        
-        # إرسال إشعارات للفائزين
-        for winner in winners:
-            try:
-                await context.bot.send_message(
-                    chat_id=winner['user_id'],
-                    text="🎉 مبروك! لقد فزت في المسابقة!"
-                )
-            except TelegramError:
-                pass
-        
-        logger.info(f"Lucky wheel contest {contest_id} ended successfully")
-
-# ═══════════════════════════════════════════════════════════════
-# 🔗 مسابقة الإحالات (Referral Contest)
-# ═══════════════════════════════════════════════════════════════
-
-class ReferralContest:
-    """إدارة مسابقة الإحالات"""
-    
-    def __init__(self, db: Database):
-        self.db = db
-    
-    async def create(
-        self,
-        owner_id: int,
-        channel_id: str,
-        message_text: str
-    ) -> int:
-        """إنشاء مسابقة إحالات"""
-        settings = {
-            'message_text': message_text
-        }
-        
-        contest_id = await self.db.create_contest(
-            owner_id, channel_id, 'referral', settings
-        )
-        
-        return contest_id
-    
-    async def publish_contest(
-        self,
-        context: ContextTypes.DEFAULT_TYPE,
-        contest_id: int,
-        channel_id: str,
-        message_text: str
-    ) -> int:
-        """نشر مسابقة الإحالات"""
-        keyboard = [[
-            InlineKeyboardButton(
-                "🚀 الانضمام للمسابقة",
-                url=f"https://t.me/{context.bot.username}?start=ref_{contest_id}"
-            )
-        ]]
-        
-        message = await context.bot.send_message(
-            chat_id=channel_id,
-            text=f"{message_text}\n\n"
-                 f"👇 اضغط للانضمام والحصول على رابط الإحالة الخاص بك!",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode=ParseMode.MARKDOWN
-        )
-        
-        # حفظ رابط المنشور في إعدادات المسابقة
-        async with aiosqlite.connect(self.db.db_name) as db:
-            # الحصول على الإعدادات الحالية
-            async with db.execute(
-                'SELECT settings FROM contests WHERE id = ?', (contest_id,)
-            ) as cursor:
-                result = await cursor.fetchone()
-                if result:
-                    settings = json.loads(result[0])
-                else:
-                    settings = {}
-            
-            # إضافة معرف الرسالة ورابط المنشور
-            settings['contest_message_id'] = message.message_id
-            
-            # تكوين رابط المنشور
-            clean_channel = channel_id.replace('@', '')
-            contest_post_link = f"https://t.me/{clean_channel}/{message.message_id}"
-            settings['contest_post_link'] = contest_post_link
-            
-            await db.execute('''
-                UPDATE contests 
-                SET settings = ?
-                WHERE id = ?
-            ''', (json.dumps(settings), contest_id))
-            await db.commit()
-        
-        return message.message_id
-    
-    async def handle_referral_join(
-        self,
-        update: Update,
-        context: ContextTypes.DEFAULT_TYPE,
-        contest_id: int,
-        referrer_id: Optional[int] = None
-    ):
-        """معالجة الانضمام عبر رابط الإحالة"""
-        user_id = update.effective_user.id
-        username = update.effective_user.username or f"user_{user_id}"
-        
-        # تحديد ما إذا كان callback أم message
-        is_callback = update.callback_query is not None
-        
-        # الحصول على معلومات المسابقة
-        contest = await self.db.get_contest(contest_id)
-        if not contest or contest['status'] != 'active':
-            if is_callback:
-                await update.callback_query.answer("❌ المسابقة منتهية!", show_alert=True)
-            else:
-                await update.message.reply_text("❌ المسابقة منتهية!")
-            return
-        
-        channel_id = contest['channel_id']
-        
-        # سجل للتحقق
-        logger.info(f"Checking subscriptions for user {user_id}")
-        logger.info(f"Official channel: {OFFICIAL_CHANNEL}")
-        logger.info(f"Contest channel: {channel_id}")
-        logger.info(f"Referrer ID: {referrer_id}")
-        
-        # التحقق من الاشتراك في القناتين
-        channels = [OFFICIAL_CHANNEL, channel_id]
-        is_subscribed, not_subscribed = await check_multiple_subscriptions(
-            context, user_id, channels
-        )
-        
-        logger.info(f"Not subscribed to: {not_subscribed}")
-        
-        if not_subscribed:
-            keyboard = []
-            
-            # إضافة أزرار الاشتراك لكل قناة غير مشترك فيها
-            for channel in not_subscribed:
-                clean_channel = channel.replace('@', '')
-                keyboard.append([
-                    InlineKeyboardButton(
-                        f"📢 اشترك في {channel}",
-                        url=f"https://t.me/{clean_channel}"
-                    )
-                ])
-            
-            keyboard.append([
-                InlineKeyboardButton(
-                    "✅ تحقق من الاشتراك",
-                    callback_data=f"check_ref_{contest_id}_{referrer_id or 0}"
-                )
-            ])
-            
-            # إنشاء قائمة القنوات المطلوبة
-            channels_list = "\n".join([f"• {ch}" for ch in not_subscribed])
-            
-            message_text = (
-                "⚠️ يجب الاشتراك في القنوات التالية أولاً:\n\n"
-                f"{channels_list}\n\n"
-                "اضغط على الأزرار أدناه للاشتراك، ثم اضغط 'تحقق من الاشتراك'"
-            )
-            
-            if is_callback:
-                await update.callback_query.answer()
-                await context.bot.send_message(
-                    chat_id=user_id,
-                    text=message_text,
-                    reply_markup=InlineKeyboardMarkup(keyboard)
-                )
-            else:
-                await update.message.reply_text(
-                    message_text,
-                    reply_markup=InlineKeyboardMarkup(keyboard)
-                )
-            return
-        
-        # التحقق من وجود المستخدم في المسابقة
-        async with aiosqlite.connect(self.db.db_name) as db:
-            async with db.execute('''
-                SELECT id, referral_code, referral_count, referred_by 
-                FROM referral_participants 
-                WHERE contest_id = ? AND user_id = ?
-            ''', (contest_id, user_id)) as cursor:
-                existing = await cursor.fetchone()
-        
-        # إذا دخل برابط شخص آخر (referrer_id موجود)
-        if referrer_id:
-            if existing:
-                # المستخدم موجود بالفعل - أرسل له رابطه
-                is_temp = existing[1] and existing[1].endswith('_temp')
-                
-                if is_temp:
-                    # لا يزال "إحالة فقط" - أخبره بالدخول من رابط المسابقة
-                    # الحصول على رابط المنشور
-                    contest_info = await self.db.get_contest(contest_id)
-                    settings = json.loads(contest_info['settings'])
-                    contest_post_link = settings.get('contest_post_link', f"https://t.me/{context.bot.username}?start=ref_{contest_id}")
-                    
-                    # تجنب مشاكل Markdown مع الروابط
-                    message_text = (
-                        f"✅ تم تسجيل دخولك!\n\n"
-                        f"💡 للحصول على رابط إحالة خاص بك والمشاركة في المسابقة،\n"
-                        f"يجب عليك الدخول من رابط المسابقة في القناة:\n\n"
-                        f"{contest_post_link}"
-                    )
-                else:
-                    # مشارك كامل
-                    referral_link = (
-                        f"https://t.me/{context.bot.username}"
-                        f"?start=ref_{contest_id}_{user_id}"
-                    )
-                    
-                    message_text = (
-                        f"✅ أنت مشترك بالفعل في المسابقة!\n\n"
-                        f"🔗 رابط الإحالة الخاص بك:\n"
-                        f"`{referral_link}`\n\n"
-                        f"👥 عدد إحالاتك: {existing[2]}"
-                    )
-            else:
-                # المستخدم جديد - سجله كإحالة فقط (بدون رابط أو منشور)
-                referral_code = f"ref_{contest_id}_{user_id}_temp"
-                
-                async with aiosqlite.connect(self.db.db_name) as db:
-                    await db.execute('''
-                        INSERT INTO referral_participants 
-                        (contest_id, user_id, username, referral_code, referred_by)
-                        VALUES (?, ?, ?, ?, ?)
-                    ''', (contest_id, user_id, username, referral_code, referrer_id))
-                    await db.commit()
-                
-                # زيادة عداد المُحيل
-                async with aiosqlite.connect(self.db.db_name) as db:
-                    await db.execute('''
-                        UPDATE referral_participants 
-                        SET referral_count = referral_count + 1 
-                        WHERE user_id = ? AND contest_id = ?
-                    ''', (referrer_id, contest_id))
-                    await db.commit()
-                
-                # تحديث منشور المُحيل
-                await self.update_user_post(context, contest_id, referrer_id)
-                
-                # إشعار المُحيل
-                try:
-                    await context.bot.send_message(
-                        chat_id=referrer_id,
-                        text=f"🎉 مبروك! حصلت على إحالة جديدة!\n"
-                             f"👤 المستخدم: @{username}"
-                    )
-                except TelegramError:
-                    pass
-                
-                # رسالة للمستخدم الجديد - استخدام رابط المنشور
-                contest_info = await self.db.get_contest(contest_id)
-                settings = json.loads(contest_info['settings'])
-                contest_post_link = settings.get('contest_post_link', f"https://t.me/{context.bot.username}?start=ref_{contest_id}")
-                
-                # تجنب مشاكل Markdown
-                message_text = (
-                    f"✅ تم تسجيل دخولك!\n\n"
-                    f"💡 للحصول على رابط إحالة خاص بك والمشاركة في المسابقة،\n"
-                    f"يجب عليك الدخول من رابط المسابقة في القناة:\n\n"
-                    f"{contest_post_link}"
-                )
-            
-            if is_callback:
-                await update.callback_query.answer()
-                await context.bot.send_message(
-                    chat_id=user_id,
-                    text=message_text
-                )
-            else:
-                await update.message.reply_text(
-                    message_text
-                )
-            return
-        
-        # إذا دخل من الرابط الأساسي (بدون referrer_id)
-        if existing:
-            # المستخدم موجود - التحقق إذا كان "إحالة فقط" أو "مشارك كامل"
-            is_temp = existing[1] and existing[1].endswith('_temp')  # referral_code
-            
-            if is_temp:
-                # ترقية من "إحالة فقط" إلى "مشارك كامل"
-                new_referral_code = f"ref_{contest_id}_{user_id}"
-                
-                async with aiosqlite.connect(self.db.db_name) as db:
-                    await db.execute('''
-                        UPDATE referral_participants 
-                        SET referral_code = ?
-                        WHERE contest_id = ? AND user_id = ?
-                    ''', (new_referral_code, contest_id, user_id))
-                    await db.commit()
-                
-                # نشر منشور في القناة
-                await self.publish_user_post(context, contest_id, user_id, username, channel_id)
-                
-                # إرسال رابط الإحالة
-                referral_link = (
-                    f"https://t.me/{context.bot.username}"
-                    f"?start=ref_{contest_id}_{user_id}"
-                )
-                
-                message_text = (
-                    f"🎉 مبروك! تمت ترقيتك إلى مشارك رسمي!\n\n"
-                    f"🔗 رابط الإحالة الخاص بك:\n"
-                    f"`{referral_link}`\n\n"
-                    f"👥 عدد إحالاتك: {existing[2]}\n\n"
-                    f"شارك هذا الرابط مع أصدقائك للحصول على نقاط!"
-                )
-            else:
-                # مشارك كامل بالفعل
-                referral_link = (
-                    f"https://t.me/{context.bot.username}"
-                    f"?start=ref_{contest_id}_{user_id}"
-                )
-                
-                message_text = (
-                    f"✅ أنت مشترك بالفعل!\n\n"
-                    f"🔗 رابط الإحالة الخاص بك:\n"
-                    f"`{referral_link}`\n\n"
-                    f"👥 عدد إحالاتك: {existing[2]}"
-                )
-            
-            if is_callback:
-                await update.callback_query.answer()
-                await context.bot.send_message(
-                    chat_id=user_id,
-                    text=message_text,
-                    parse_mode=ParseMode.MARKDOWN
-                )
-            else:
-                await update.message.reply_text(
-                    message_text,
-                    parse_mode=ParseMode.MARKDOWN
-                )
-            return
-        
-        # مستخدم جديد - إنشاء حساب كامل مع رابط ومنشور
-        referral_code = f"ref_{contest_id}_{user_id}"
-        
-        async with aiosqlite.connect(self.db.db_name) as db:
-            await db.execute('''
-                INSERT INTO referral_participants 
-                (contest_id, user_id, username, referral_code, referred_by)
-                VALUES (?, ?, ?, ?, NULL)
-            ''', (contest_id, user_id, username, referral_code))
-            await db.commit()
-        
-        # نشر منشور في القناة
-        await self.publish_user_post(context, contest_id, user_id, username, channel_id)
-        
-        # إرسال رابط الإحالة
-        referral_link = (
-            f"https://t.me/{context.bot.username}"
-            f"?start=ref_{contest_id}_{user_id}"
-        )
-        
-        message_text = (
-            f"✅ تم الانضمام بنجاح!\n\n"
-            f"🔗 رابط الإحالة الخاص بك:\n"
-            f"`{referral_link}`\n\n"
-            f"شارك هذا الرابط مع أصدقائك للحصول على نقاط!"
-        )
-        
-        if is_callback:
-            await update.callback_query.answer()
-            await context.bot.send_message(
-                chat_id=user_id,
-                text=message_text,
-                parse_mode=ParseMode.MARKDOWN
-            )
-        else:
-            await update.message.reply_text(
-                message_text,
-                parse_mode=ParseMode.MARKDOWN
-            )
-    
-    async def publish_user_post(
-        self,
-        context: ContextTypes.DEFAULT_TYPE,
-        contest_id: int,
-        user_id: int,
-        username: str,
-        channel_id: str
-    ):
-        """نشر منشور المشترك في القناة"""
-        keyboard = [[
-            InlineKeyboardButton(
-                "👥 عدد الإحالات: 0",
-                callback_data=f"ref_count_{contest_id}_{user_id}"
-            )
-        ]]
-        
-        display_name = f"@{username}" if not username.startswith('user_') else f"ID: {user_id}"
-        
-        message = await context.bot.send_message(
-            chat_id=channel_id,
-            text=f"🎯 {display_name} انضم للمسابقة!",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-        
-        # حفظ معرف الرسالة
-        async with aiosqlite.connect(self.db.db_name) as db:
-            await db.execute('''
-                UPDATE referral_participants 
-                SET message_id = ? 
-                WHERE user_id = ? AND contest_id = ?
-            ''', (message.message_id, user_id, contest_id))
-            await db.commit()
-    
-    async def update_user_post(
-        self,
-        context: ContextTypes.DEFAULT_TYPE,
-        contest_id: int,
-        user_id: int
-    ):
-        """تحديث منشور المستخدم"""
-        async with aiosqlite.connect(self.db.db_name) as db:
-            db.row_factory = aiosqlite.Row
-            async with db.execute('''
-                SELECT rp.*, c.channel_id 
-                FROM referral_participants rp
-                JOIN contests c ON rp.contest_id = c.id
-                WHERE rp.user_id = ? AND rp.contest_id = ?
-            ''', (user_id, contest_id)) as cursor:
-                participant = await cursor.fetchone()
-        
-        if not participant or not participant['message_id']:
-            return
-        
-        keyboard = [[
-            InlineKeyboardButton(
-                f"👥 عدد الإحالات: {participant['referral_count']}",
-                callback_data=f"ref_count_{contest_id}_{user_id}"
-            )
-        ]]
-        
-        username = participant['username']
-        display_name = f"@{username}" if not username.startswith('user_') else f"ID: {user_id}"
-        
-        try:
-            await context.bot.edit_message_text(
-                chat_id=participant['channel_id'],
-                message_id=participant['message_id'],
-                text=f"🎯 {display_name} انضم للمسابقة!",
-                reply_markup=InlineKeyboardMarkup(keyboard)
-            )
-        except TelegramError:
-            pass
-    
-    async def check_subscriptions_task(
-        self,
-        context: ContextTypes.DEFAULT_TYPE
-    ):
-        """مهمة دورية للتحقق من الاشتراكات"""
-        async with aiosqlite.connect(self.db.db_name) as db:
-            db.row_factory = aiosqlite.Row
-            
-            # الحصول على جميع المشتركين النشطين
-            async with db.execute('''
-                SELECT rp.*, c.channel_id
-                FROM referral_participants rp
-                JOIN contests c ON rp.contest_id = c.id
-                WHERE c.status = 'active'
-            ''') as cursor:
-                participants = await cursor.fetchall()
-        
-        for participant in participants:
-            user_id = participant['user_id']
-            contest_id = participant['contest_id']
-            channel_id = participant['channel_id']
-            
-            # التحقق من الاشتراك في القناتين
-            channels = [OFFICIAL_CHANNEL, channel_id]
-            is_subscribed, _ = await check_multiple_subscriptions(
-                context, user_id, channels
-            )
-            
-            if not is_subscribed:
-                # حذف إحالاته من المُحيل
-                if participant['referred_by']:
-                    async with aiosqlite.connect(self.db.db_name) as db:
-                        await db.execute('''
-                            UPDATE referral_participants 
-                            SET referral_count = referral_count - 1 
-                            WHERE user_id = ? AND contest_id = ?
-                        ''', (participant['referred_by'], contest_id))
-                        await db.commit()
-                    
-                    # تحديث منشور المُحيل
-                    await self.update_user_post(
-                        context, contest_id, participant['referred_by']
-                    )
-                
-                # حذف المستخدم
-                async with aiosqlite.connect(self.db.db_name) as db:
-                    await db.execute('''
-                        DELETE FROM referral_participants 
-                        WHERE id = ?
-                    ''', (participant['id'],))
-                    await db.commit()
-                
-                logger.info(
-                    f"Removed user {user_id} from referral contest "
-                    f"{contest_id} for leaving channels"
-                )
-    
-    async def publish_leaderboard(
-        self,
-        context: ContextTypes.DEFAULT_TYPE,
-        contest_id: int
-    ):
-        """نشر لوحة المتصدرين"""
-        contest = await self.db.get_contest(contest_id)
-        if not contest:
-            return
-        
-        channel_id = contest['channel_id']
-        
-        # الحصول على أفضل 10
-        async with aiosqlite.connect(self.db.db_name) as db:
-            db.row_factory = aiosqlite.Row
-            async with db.execute('''
-                SELECT user_id, username, referral_count 
-                FROM referral_participants 
-                WHERE contest_id = ?
-                ORDER BY referral_count DESC
-                LIMIT 10
-            ''', (contest_id,)) as cursor:
-                top_participants = await cursor.fetchall()
-        
-        if not top_participants:
-            return
-        
-        # تنسيق اللوحة
-        leaderboard_text = "🏆 *لوحة المتصدرين*\n\n"
-        
-        for i, participant in enumerate(top_participants, 1):
-            username = participant['username']
-            user_id = participant['user_id']
-            count = participant['referral_count']
-            
-            medal = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else f"{i}."
-            
-            if username.startswith('user_'):
-                leaderboard_text += f"{medal} ID: `{user_id}` - {count} إحالة\n"
-            else:
-                leaderboard_text += f"{medal} @{username} - {count} إحالة\n"
-        
-        # نشر اللوحة
-        await context.bot.send_message(
-            chat_id=channel_id,
-            text=leaderboard_text,
-            parse_mode=ParseMode.MARKDOWN
-        )
-    
-    async def end_contest(
-        self,
-        context: ContextTypes.DEFAULT_TYPE,
-        contest_id: int
-    ):
-        """إنهاء المسابقة ونشر النتائج"""
-        contest = await self.db.get_contest(contest_id)
-        if not contest:
-            return
-        
-        channel_id = contest['channel_id']
-        
-        logger.info(f"Starting final subscription check for referral contest {contest_id}")
-        
-        # الفحص النهائي: حذف جميع المشاركين غير المشتركين
-        async with aiosqlite.connect(self.db.db_name) as db:
-            db.row_factory = aiosqlite.Row
-            async with db.execute('''
-                SELECT id, user_id, referred_by, referral_count
-                FROM referral_participants 
-                WHERE contest_id = ?
-            ''', (contest_id,)) as cursor:
-                all_participants = await cursor.fetchall()
-        
-        # التحقق من اشتراك كل مشارك
-        removed_count = 0
-        for participant in all_participants:
-            user_id = participant['user_id']
-            
-            # التحقق من الاشتراك في القناتين
-            channels = [OFFICIAL_CHANNEL, channel_id]
-            is_subscribed, _ = await check_multiple_subscriptions(
-                context, user_id, channels
-            )
-            
-            if not is_subscribed:
-                # إذا كان لديه من أحاله، خصم الإحالة من المُحيل
-                if participant['referred_by']:
-                    async with aiosqlite.connect(self.db.db_name) as db:
-                        await db.execute('''
-                            UPDATE referral_participants 
-                            SET referral_count = referral_count - 1 
-                            WHERE user_id = ? AND contest_id = ?
-                        ''', (participant['referred_by'], contest_id))
-                        await db.commit()
-                
-                # خصم إحالاته من العداد (لأنهم سيُحذفون أيضاً إذا لم يكونوا مشتركين)
-                # لكن لن نفعل شيء هنا لأن الحلقة ستتعامل مع كل مشارك
-                
-                # حذف المشارك
-                async with aiosqlite.connect(self.db.db_name) as db:
-                    await db.execute('''
-                        DELETE FROM referral_participants 
-                        WHERE id = ?
-                    ''', (participant['id'],))
-                    await db.commit()
-                
-                removed_count += 1
-                logger.info(f"Removed participant {user_id} (not subscribed)")
-        
-        if removed_count > 0:
-            logger.info(f"Removed {removed_count} participants from unsubscribed users")
-            
-            # تحديث عدادات الإحالات بعد الحذف
-            # حساب العدد الصحيح لكل مشارك
-            async with aiosqlite.connect(self.db.db_name) as db:
-                # الحصول على جميع المشاركين المتبقين
-                async with db.execute('''
-                    SELECT user_id 
-                    FROM referral_participants 
-                    WHERE contest_id = ?
-                ''', (contest_id,)) as cursor:
-                    remaining = await cursor.fetchall()
-                
-                # إعادة حساب عدد الإحالات لكل مشارك
-                for participant in remaining:
-                    async with db.execute('''
-                        SELECT COUNT(*) 
-                        FROM referral_participants 
-                        WHERE contest_id = ? AND referred_by = ?
-                    ''', (contest_id, participant['user_id'])) as cursor:
-                        count = (await cursor.fetchone())[0]
-                    
-                    await db.execute('''
-                        UPDATE referral_participants 
-                        SET referral_count = ? 
-                        WHERE contest_id = ? AND user_id = ?
-                    ''', (count, contest_id, participant['user_id']))
-                
-                await db.commit()
-        
-        # نشر لوحة المتصدرين النهائية
-        await self.publish_leaderboard(context, contest_id)
-        
-        # إنهاء المسابقة
-        await self.db.end_contest(contest_id)
-        
-        logger.info(f"Referral contest {contest_id} ended successfully")
-
-# ═══════════════════════════════════════════════════════════════
-# 🎮 معالجات الأوامر والرسائل
-# ═══════════════════════════════════════════════════════════════
-
-# متغيرات عامة
-db = Database(DATABASE_NAME)
-voting_contest = VotingContest(db)
-lucky_wheel = LuckyWheelContest(db)
-referral_contest = ReferralContest(db)
-
-# حالات المحادثة
-user_states: Dict[int, dict] = {}
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """معالج أمر /start"""
-    user_id = update.effective_user.id
-    
-    # التحقق من وجود معامل (رابط إحالة)
-    if context.args:
-        param = context.args[0]
-        
-        if param.startswith('ref_'):
-            parts = param.split('_')
-            if len(parts) >= 2:
-                contest_id = int(parts[1])
-                referrer_id = int(parts[2]) if len(parts) > 2 else None
-                
-                await referral_contest.handle_referral_join(
-                    update, context, contest_id, referrer_id
-                )
-                return
-    
-    # الرسالة الترحيبية
-    keyboard = [
-        [InlineKeyboardButton("🗳️ مسابقة تصويت", callback_data="create_voting")],
-        [InlineKeyboardButton("🎰 عجلة الحظ", callback_data="create_lucky")],
-        [InlineKeyboardButton("🔗 مسابقة إحالات", callback_data="create_referral")],
-        [InlineKeyboardButton("📋 مسابقاتي", callback_data="my_contests")],
-        [InlineKeyboardButton("❌ إيقاف مسابقة", callback_data="end_contest")],
-    ]
-    
-    await update.message.reply_text(
-        "🎯 *مرحباً في بوت المسابقات المتقدم!*\n\n"
-        "اختر نوع المسابقة التي تريد إنشاءها:",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode=ParseMode.MARKDOWN
-    )
-
-async def done_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """معالج أمر /done لإنهاء إضافة المتسابقين"""
-    user_id = update.effective_user.id
-    
-    if user_id not in user_states:
-        return
-    
-    state_info = user_states[user_id]
-    
-    if state_info.get('state') == 'waiting_voting_participants':
-        if 'contest_id' not in state_info:
-            await update.message.reply_text("❌ لم تقم بإضافة أي متسابقين بعد!")
-            return
-        
-        # التحقق من وجود متسابقين
-        async with aiosqlite.connect(db.db_name) as db_conn:
-            async with db_conn.execute('''
-                SELECT COUNT(*) FROM voting_participants 
-                WHERE contest_id = ?
-            ''', (state_info['contest_id'],)) as cursor:
-                count = (await cursor.fetchone())[0]
-        
-        if count < 2:
-            await update.message.reply_text(
-                "❌ يجب إضافة متسابقين على الأقل!\n"
-                "أرسل أسماء إضافية أو /cancel للإلغاء"
-            )
-            return
-        
-        await update.message.reply_text(
-            f"✅ تم إنشاء مسابقة التصويت بنجاح!\n"
-            f"📊 عدد المتسابقين: {count}\n"
-            f"تم نشرهم جميعًا في القناة."
-        )
-        
-        del user_states[user_id]
-
-async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """معالج أمر /cancel لإلغاء العملية الحالية"""
-    user_id = update.effective_user.id
-    
-    if user_id in user_states:
-        state_info = user_states[user_id]
-        
-        # حذف المسابقة إذا كانت قيد الإنشاء
-        if 'contest_id' in state_info:
-            contest_id = state_info['contest_id']
-            async with aiosqlite.connect(db.db_name) as db_conn:
-                await db_conn.execute('DELETE FROM contests WHERE id = ?', (contest_id,))
-                await db_conn.execute('DELETE FROM voting_participants WHERE contest_id = ?', (contest_id,))
-                await db_conn.commit()
-        
-        del user_states[user_id]
-        await update.message.reply_text("❌ تم إلغاء العملية.")
-    else:
-        await update.message.reply_text("لا توجد عملية جارية للإلغاء.")
-
-async def skip_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """معالج أمر /skip للتخطي"""
-    user_id = update.effective_user.id
-    
-    if user_id not in user_states:
-        return
-    
-    state_info = user_states[user_id]
-    
-    # معالجة التخطي حسب الحالة
-    if state_info.get('state') == 'waiting_lucky_message':
-        state_info['custom_message'] = None
-        state_info['state'] = 'waiting_lucky_max'
-        
-        await update.message.reply_text(
-            "⏭️ تم التخطي\n\n"
-            "🔢 أرسل العدد الأقصى للمشتركين:\n"
-            "(مثال: 100)"
-        )
-
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """معالج الأزرار"""
-    query = update.callback_query
-    data = query.data
-    user_id = query.from_user.id
-    
-    # مسابقة التصويت
-    if data.startswith('vote_'):
-        await voting_contest.handle_vote(update, context)
-        return
-    
-    # عجلة الحظ
-    if data.startswith('lucky_join_'):
-        await lucky_wheel.handle_join(update, context)
-        return
-    
-    # التحقق من الاشتراك للإحالة
-    if data.startswith('check_ref_'):
-        parts = data.split('_')
-        contest_id = int(parts[2])
-        referrer_id = int(parts[3]) if parts[3] != '0' else None
-        
-        # إعادة محاولة الانضمام
-        await referral_contest.handle_referral_join(
-            update, context, contest_id, referrer_id
-        )
-        return
-    
-    # إنشاء مسابقة تصويت
-    if data == 'create_voting':
-        await query.answer()
-        user_states[user_id] = {'state': 'waiting_voting_channel'}
-        await query.message.reply_text(
-            "📢 أرسل معرف القناة (مثال: @channelname)\n"
-            "تأكد من رفع البوت كمشرف مع صلاحية النشر!"
-        )
-        return
-    
-    # إنشاء عجلة حظ
-    if data == 'create_lucky':
-        await query.answer()
-        user_states[user_id] = {'state': 'waiting_lucky_channel'}
-        await query.message.reply_text(
-            "📢 أرسل معرف القناة (مثال: @channelname)\n"
-            "تأكد من رفع البوت كمشرف مع صلاحية النشر!"
-        )
-        return
-    
-    # إنشاء مسابقة إحالات
-    if data == 'create_referral':
-        await query.answer()
-        user_states[user_id] = {'state': 'waiting_referral_channel'}
-        await query.message.reply_text(
-            "📢 أرسل معرف القناة (مثال: @channelname)\n"
-            "تأكد من رفع البوت كمشرف مع صلاحية النشر!"
-        )
-        return
-    
-    # عرض المسابقات
-    if data == 'my_contests':
-        await query.answer()
-        contests = await db.get_active_contests_by_owner(user_id)
-        
-        if not contests:
-            await query.message.reply_text("ليس لديك مسابقات نشطة حالياً.")
-            return
-        
-        text = "📋 مسابقاتك النشطة:\n\n"
-        for contest in contests:
-            contest_type = {
-                'voting': '🗳️ تصويت',
-                'lucky_wheel': '🎰 عجلة حظ',
-                'referral': '🔗 إحالات'
-            }.get(contest['contest_type'], contest['contest_type'])
-            
-            text += f"• {contest_type} - القناة: {contest['channel_id']}\n"
-        
-        await query.message.reply_text(text)
-        return
-    
-    # إيقاف مسابقة
-    if data == 'end_contest':
-        await query.answer()
-        contests = await db.get_active_contests_by_owner(user_id)
-        
-        if not contests:
-            await query.message.reply_text("ليس لديك مسابقات نشطة لإيقافها.")
-            return
-        
-        keyboard = []
-        for contest in contests:
-            contest_type = {
-                'voting': '🗳️',
-                'lucky_wheel': '🎰',
-                'referral': '🔗'
-            }.get(contest['contest_type'], '')
-            
-            keyboard.append([
-                InlineKeyboardButton(
-                    f"{contest_type} {contest['channel_id']}",
-                    callback_data=f"confirm_end_{contest['id']}"
-                )
-            ])
-        
-        await query.message.reply_text(
-            "اختر المسابقة التي تريد إيقافها:",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-        return
-    
-    # تأكيد إيقاف المسابقة
-    if data.startswith('confirm_end_'):
-        await query.answer()
-        contest_id = int(data.split('_')[2])
-        
-        contest = await db.get_contest(contest_id)
-        if not contest or contest['owner_id'] != user_id:
-            await query.message.reply_text("❌ غير مسموح!")
-            return
-        
-        # إنهاء حسب النوع
-        if contest['contest_type'] == 'voting':
-            await voting_contest.end_contest(context, contest_id)
-        elif contest['contest_type'] == 'lucky_wheel':
-            await lucky_wheel.draw_winners(context, contest_id)
-        elif contest['contest_type'] == 'referral':
-            await referral_contest.end_contest(context, contest_id)
-        
-        await query.message.reply_text("✅ تم إنهاء المسابقة بنجاح!")
-        return
-
-async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """معالج الرسائل النصية"""
-    user_id = update.effective_user.id
-    text = update.message.text
-    
-    if user_id not in user_states:
-        return
-    
-    state_info = user_states[user_id]
-    state = state_info.get('state')
-    
-    # ══════ مسابقة التصويت ══════
-    if state == 'waiting_voting_channel':
-        if not text.startswith('@'):
-            await update.message.reply_text("❌ يجب أن يبدأ المعرف بـ @")
-            return
-        
-        state_info['channel_id'] = text
-        state_info['state'] = 'waiting_voting_participants'
-        
-        await update.message.reply_text(
-            "👥 أرسل اسم المتسابق الأول:\n\n"
-            "💡 بعد كل اسم سيتم نشره مباشرة في القناة\n"
-            "استخدم /done عند الانتهاء من إضافة جميع المتسابقين"
-        )
-        return
-    
-    if state == 'waiting_voting_participants':
-        # إنشاء المسابقة إذا لم تكن موجودة
-        if 'contest_id' not in state_info:
-            contest_id = await voting_contest.create(
-                user_id, state_info['channel_id'], []
-            )
-            state_info['contest_id'] = contest_id
-            await update.message.reply_text(
-                "✅ تم إنشاء المسابقة!\n\n"
-                "📝 يمكنك الآن إرسال أسماء المتسابقين واحدًا تلو الآخر\n"
-                "أرسل /done عندما تنتهي"
-            )
-            return
-        
-        # إضافة المتسابق الجديد
-        participant_name = text.strip()
-        if not participant_name:
-            return
-        
-        contest_id = state_info['contest_id']
-        
-        # إضافة المتسابق للقاعدة
-        async with aiosqlite.connect(db.db_name) as db_conn:
-            cursor = await db_conn.execute('''
-                INSERT INTO voting_participants (contest_id, name)
-                VALUES (?, ?)
-            ''', (contest_id, participant_name))
-            await db_conn.commit()
-            participant_id = cursor.lastrowid
-        
-        # نشر المتسابق في القناة
-        keyboard = [[
-            InlineKeyboardButton(
-                "❤️ صوّت", 
-                callback_data=f"vote_{participant_id}"
-            )
-        ]]
-        
-        message = await context.bot.send_message(
-            chat_id=state_info['channel_id'],
-            text=f"🎯 المتسابق: {participant_name}\n\n"
-                 f"❤️ عدد الأصوات: 0",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-        
-        # حفظ معرف الرسالة
-        async with aiosqlite.connect(db.db_name) as db_conn:
-            await db_conn.execute('''
-                UPDATE voting_participants 
-                SET message_id = ? 
-                WHERE id = ?
-            ''', (message.message_id, participant_id))
-            await db_conn.commit()
-        
-        await update.message.reply_text(
-            f"✅ تمت إضافة: {participant_name}\n\n"
-            "📝 أرسل اسم متسابق آخر أو /done للإنهاء"
-        )
-        return
-    
-    # ══════ عجلة الحظ ══════
-    if state == 'waiting_lucky_channel':
-        if not text.startswith('@'):
-            await update.message.reply_text("❌ يجب أن يبدأ المعرف بـ @")
-            return
-        
-        state_info['channel_id'] = text
-        state_info['state'] = 'waiting_lucky_message'
-        
-        await update.message.reply_text(
-            "📝 أرسل نص المسابقة (اختياري):\n\n"
-            "مثال: 🎁 الجائزة: 100 دولار\n\n"
-            "أو أرسل /skip للتخطي"
-        )
-        return
-    
-    if state == 'waiting_lucky_message':
-        custom_message = text.strip() if text.strip() != '/skip' else None
-        state_info['custom_message'] = custom_message
-        state_info['state'] = 'waiting_lucky_max'
-        
-        await update.message.reply_text(
-            "🔢 أرسل العدد الأقصى للمشتركين:\n"
-            "(مثال: 100)"
-        )
-        return
-    
-    if state == 'waiting_lucky_max':
-        try:
-            max_participants = int(text)
-            if max_participants < 2:
-                raise ValueError()
-        except ValueError:
-            await update.message.reply_text("❌ يجب إدخال رقم صحيح أكبر من 1!")
-            return
-        
-        state_info['max_participants'] = max_participants
-        state_info['state'] = 'waiting_lucky_winners'
-        
-        await update.message.reply_text(
-            "🏆 أرسل عدد الفائزين:\n"
-            "(مثال: 3)"
-        )
-        return
-    
-    if state == 'waiting_lucky_winners':
-        try:
-            winners_count = int(text)
-            if winners_count < 1 or winners_count > state_info['max_participants']:
-                raise ValueError()
-        except ValueError:
-            await update.message.reply_text(
-                f"❌ يجب إدخال رقم بين 1 و {state_info['max_participants']}!"
-            )
-            return
-        
-        # إنشاء المسابقة
-        contest_id = await lucky_wheel.create(
-            user_id,
-            state_info['channel_id'],
-            state_info['max_participants'],
-            winners_count,
-            state_info.get('custom_message')
-        )
-        
-        # نشر المسابقة
-        await lucky_wheel.publish_contest(
-            context,
-            contest_id,
-            state_info['channel_id'],
-            state_info['max_participants'],
-            state_info.get('custom_message')
-        )
-        
-        await update.message.reply_text(
-            "✅ تم إنشاء مسابقة عجلة الحظ بنجاح!\n"
-            "تم نشر المسابقة في القناة."
-        )
-        
-        del user_states[user_id]
-        return
-    
-    # ══════ مسابقة الإحالات ══════
-    if state == 'waiting_referral_channel':
-        if not text.startswith('@'):
-            await update.message.reply_text("❌ يجب أن يبدأ المعرف بـ @")
-            return
-        
-        state_info['channel_id'] = text
-        state_info['state'] = 'waiting_referral_message'
-        
-        await update.message.reply_text(
-            "📝 أرسل رسالة المسابقة التي ستُنشر في القناة:\n\n"
-            "يمكنك استخدام Markdown للتنسيق."
-        )
-        return
-    
-    if state == 'waiting_referral_message':
-        # إنشاء المسابقة
-        contest_id = await referral_contest.create(
-            user_id, state_info['channel_id'], text
-        )
-        
-        # نشر المسابقة
-        await referral_contest.publish_contest(
-            context, contest_id, state_info['channel_id'], text
-        )
-        
-        await update.message.reply_text(
-            "✅ تم إنشاء مسابقة الإحالات بنجاح!\n"
-            "تم نشر المسابقة في القناة."
-        )
-        
-        del user_states[user_id]
-        return
-
-# ═══════════════════════════════════════════════════════════════
-# ⏰ المهام الدورية
-# ═══════════════════════════════════════════════════════════════
-
-async def periodic_subscription_check(context: ContextTypes.DEFAULT_TYPE):
-    """التحقق الدوري من الاشتراكات"""
-    logger.info("Running periodic subscription check...")
-    
-    # التحقق من اشتراكات التصويت
-    await voting_contest.check_subscriptions_task(context)
-    
-    # التحقق من اشتراكات الإحالات
-    await referral_contest.check_subscriptions_task(context)
-    
-    logger.info("Subscription check completed.")
-
-# ═══════════════════════════════════════════════════════════════
-# 🚀 نقطة البداية
-# ═══════════════════════════════════════════════════════════════
-
-async def post_init(application: Application):
-    """إعدادات ما بعد التهيئة"""
-    await db.init_db()
-    logger.info("Database initialized successfully!")
-    
-    # جدولة المهمة الدورية (كل 3 ساعات)
-    job_queue = application.job_queue
-    job_queue.run_repeating(
-        periodic_subscription_check,
-        interval=CHECK_SUBSCRIPTION_INTERVAL * 3600,
-        first=10
-    )
+        # تحميل الملفات المساعدة
+        load_helper_files(bot_num)
+        
+        # فك تشفير وتشغيل البوت
+        code = base64.b64decode(BOTS_CODE[bot_num]).decode("utf-8")
+        bots_status[bot_num]["status"] = "running"
+        exec(code, {"__name__": "__main__"})
+    except Exception as e:
+        print(f"❌ خطأ في {bot_name}: {e}")
+        bots_status[bot_num]["status"] = "error"
+        bots_status[bot_num]["error"] = str(e)
+        import traceback
+        traceback.print_exc()
 
 def main():
-    """الدالة الرئيسية"""
-    # التحقق من التوكن
-    if TELEGRAM_BOT_TOKEN == "YOUR_BOT_TOKEN_HERE":
-        print("❌ يرجى وضع توكن البوت في TELEGRAM_BOT_TOKEN")
-        return
+    global start_time
+    start_time = datetime.now()
     
-    if OFFICIAL_CHANNEL == "@YourOfficialChannel":
-        print("⚠️ يرجى وضع معرف قناتك الرسمية في OFFICIAL_CHANNEL")
+    print("=" * 70)
+    print("🚀 تشغيل 2 بوت مع Flask")
+    print("=" * 70)
     
-    # إنشاء التطبيق
-    application = (
-        Application.builder()
-        .token(TELEGRAM_BOT_TOKEN)
-        .post_init(post_init)
-        .build()
-    )
+    # تشغيل Flask
+    print("\n🌐 تشغيل Flask Server...")
+    threading.Thread(target=run_flask, daemon=True).start()
+    time.sleep(2)
+    print("✅ Flask يعمل")
     
-    # إضافة المعالجات
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("done", done_command))
-    application.add_handler(CommandHandler("cancel", cancel_command))
-    application.add_handler(CommandHandler("skip", skip_command))
-    application.add_handler(CallbackQueryHandler(button_handler))
-    application.add_handler(
-        MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler)
-    )
+    # تشغيل البوتات
+    for bot_num in range(1, 3):
+        threading.Thread(target=run_bot, args=(bot_num,), daemon=True).start()
+        time.sleep(1.5)
     
-    # بدء البوت
-    logger.info("🚀 Starting bot...")
-    print("✅ البوت يعمل الآن!")
-    print(f"📢 القناة الرسمية: {OFFICIAL_CHANNEL}")
-    print(f"⏰ فترة التحقق: {CHECK_SUBSCRIPTION_INTERVAL} ساعات")
+    print("\n" + "=" * 70)
+    print("✅ جميع البوتات تعمل!")
+    print("🌐 Flask: http://0.0.0.0:" + str(os.environ.get("PORT", 8080)))
+    print("=" * 70)
     
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print("\n⛔ توقف")
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
