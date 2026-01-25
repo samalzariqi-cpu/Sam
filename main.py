@@ -3,28 +3,33 @@ import time
 import sqlite3
 import asyncio
 import os
+import tempfile
+import shutil
 from pathlib import Path
 from typing import Optional
 from datetime import datetime
-from pyrogram import Client, filters
-from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message, CallbackQuery
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    CallbackQueryHandler,
+    MessageHandler,
+    filters,
+    ContextTypes,
+)
 
 # ==================== الإعدادات الثابتة ====================
-# إعدادات Telegram User Bot
-API_ID = 2040
-API_HASH = 'b18441a1ff607e10a989891a5462e627'
-BOT_TOKEN = "7871583760:AAEAj1NMlgMU7H8Y3To3a7lGvShVZ74BvzU"
-SESSION_NAME = "video_compressor_bot"
-
+TELEGRAM_BOT_TOKEN = "7871583760:AAEAj1NMlgMU7H8Y3To3a7lGvShVZ74BvzU"
 ADMIN_ID = 1058616316
-MAX_FILE_SIZE = 500 * 1024 * 1024  # 500MB - الحد الجديد!
+TELEGRAM_API_LIMIT = 20 * 1024 * 1024  # 20MB
+MAX_FILE_SIZE = 500 * 1024 * 1024  # 100MB الحد الأقصى الجديد
 
 # مجلد التخزين المؤقت
 TEMP_STORAGE_DIR = "temp_videos"
 
 # طابور المعالجة
 processing_queue = asyncio.Queue()
-user_data = {}  # لتخزين البيانات المؤقتة
+is_processing = False
 
 # ==================== إدارة الملفات ====================
 def init_temp_storage():
@@ -165,295 +170,22 @@ def increment_video_count(user_id):
     conn.commit()
     conn.close()
 
-# ==================== إعدادات الجودة ====================
-def get_quality_settings(quality: str) -> dict:
-    """الحصول على إعدادات الجودة"""
-    if quality == 'high':
-        return {
-            "crf": 23,
-            "preset": "medium",
-            "width": 1920,
-            "height": 1080,
-            "audio_bitrate": 128,
-            "audio_frequency": 44100,
-            "audio_channels": 2,
-            "fps": 30
-        }
-    elif quality == 'medium':
-        return {
-            "crf": 28,
-            "preset": "slow",
-            "width": 1280,
-            "height": 720,
-            "audio_bitrate": 96,
-            "audio_frequency": 44100,
-            "audio_channels": 2,
-            "fps": 30
-        }
-    else:  # low
-        return {
-            "crf": 40,
-            "preset": "veryslow",
-            "width": 854,
-            "height": 480,
-            "audio_bitrate": 48,
-            "audio_frequency": 22050,
-            "audio_channels": 1,
-            "fps": 24
-        }
-
-# ==================== ضغط الفيديو ====================
-def compress_video(video_source: str, quality: str = 'low', is_url: bool = True) -> Optional[str]:
-    """ضغط الفيديو باستخدام CloudConvert"""
-    api_key = get_api_key()
-    if not api_key:
-        return "NO_API_KEY_SET"
-
+# ==================== دوال تليجرام ====================
+async def send_message(chat_id: str, text: str, context=None):
+    """إرسال رسالة نصية"""
     try:
-        headers = {"Authorization": f"Bearer {api_key}"}
-        settings = get_quality_settings(quality)
-        
-        # تحديد حمولة Job مع إعدادات محسّنة
-        if is_url:
-            job_payload = {
-                "tasks": {
-                    "import-video": {
-                        "operation": "import/url", 
-                        "url": video_source,
-                        "filename": "input.mp4"
-                    },
-                    "compress-video": {
-                        "operation": "convert", 
-                        "input": "import-video", 
-                        "output_format": "mp4",
-                        "video_codec": "x264", 
-                        "crf": settings["crf"], 
-                        "preset": settings["preset"],
-                        "width": settings["width"], 
-                        "height": settings["height"],
-                        "audio_codec": "aac", 
-                        "audio_bitrate": settings["audio_bitrate"], 
-                        "audio_frequency": settings["audio_frequency"], 
-                        "audio_channels": settings["audio_channels"], 
-                        "strip_metadata": True, 
-                        "fps": settings["fps"],
-                        "fit": "max"
-                    },
-                    "export-video": {"operation": "export/url", "input": "compress-video"}
-                }
-            }
+        if context:
+            await context.bot.send_message(chat_id=chat_id, text=text, parse_mode='Markdown')
         else:
-            job_payload = {
-                "tasks": {
-                    "import-video": {"operation": "import/upload"},
-                    "compress-video": {
-                        "operation": "convert", 
-                        "input": "import-video", 
-                        "output_format": "mp4",
-                        "video_codec": "x264", 
-                        "crf": settings["crf"], 
-                        "preset": settings["preset"],
-                        "width": settings["width"], 
-                        "height": settings["height"],
-                        "audio_codec": "aac", 
-                        "audio_bitrate": settings["audio_bitrate"], 
-                        "audio_frequency": settings["audio_frequency"], 
-                        "audio_channels": settings["audio_channels"], 
-                        "strip_metadata": True, 
-                        "fps": settings["fps"],
-                        "fit": "max"
-                    },
-                    "export-video": {"operation": "export/url", "input": "compress-video"}
-                }
-            }
-        
-        response = requests.post(
-            "https://api.cloudconvert.com/v2/jobs",
-            json=job_payload,
-            headers=headers
-        )
-        
-        if response.status_code != 201:
-            print(f"❌ فشل إنشاء Job: {response.text}")
-            return None
-            
-        job_data = response.json()["data"]
-        job_id = job_data["id"]
-        
-        # رفع الملف إذا كان محلياً
-        if not is_url:
-            import_task = next((t for t in job_data["tasks"] if t["name"] == "import-video"), None)
-            if not import_task:
-                return None
-            
-            upload_url = import_task["result"]["form"]["url"]
-            upload_params = import_task["result"]["form"]["parameters"]
-            
-            print(f"📤 رفع الملف إلى CloudConvert...")
-            with open(video_source, 'rb') as f:
-                files = {'file': f}
-                upload_response = requests.post(upload_url, data=upload_params, files=files)
-            
-            if upload_response.status_code not in [200, 201]:
-                print(f"❌ فشل رفع الملف: {upload_response.text}")
-                return None
-            
-            print("✅ تم رفع الملف لـ CloudConvert")
-            
-            # حذف الملف المحلي فوراً بعد الرفع
-            delete_file_safe(video_source)
-        
-        # انتظار اكتمال المعالجة
-        max_attempts = 240  # زيادة الوقت للملفات الكبيرة
-        attempt = 0
-        
-        while attempt < max_attempts:
-            job_status = requests.get(
-                f"https://api.cloudconvert.com/v2/jobs/{job_id}",
-                headers=headers
-            ).json()
-            
-            status = job_status["data"]["status"]
-            
-            if status == "finished":
-                tasks = job_status["data"]["tasks"]
-                export_task = next((t for t in tasks if t["name"] == "export-video"), None)
-                
-                if export_task and export_task.get("result") and export_task["result"].get("files"):
-                    download_url = export_task["result"]["files"][0]["url"]
-                    file_size = export_task["result"]["files"][0].get("size", 0)
-                    file_size_mb = file_size / (1024*1024)
-                    print(f"✅ اكتمل الضغط! الحجم: {file_size_mb:.2f} MB")
-                    return download_url
-                    
-            elif status == "error":
-                print(f"❌ خطأ في المعالجة: {job_status}")
-                return None
-                
-            time.sleep(5)
-            attempt += 1
-        
-        print("❌ انتهى الوقت")
-        return None
-        
+            url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+            requests.post(url, data={"chat_id": chat_id, "text": text, "parse_mode": 'Markdown'})
     except Exception as e:
-        print(f"❌ خطأ في الضغط: {e}")
-        return None
-
-# ==================== معالجة طابور الفيديو ====================
-async def process_video_queue(app: Client):
-    """معالج طابور الفيديو"""
-    
-    while True:
-        try:
-            video_data = await processing_queue.get()
-            
-            chat_id = video_data['chat_id']
-            user_id = video_data['user_id']
-            video_source = video_data['source']
-            source_type = video_data['type']
-            file_size = video_data.get('file_size', 0)
-            quality = video_data.get('quality', 'low')
-            
-            print(f"🎬 بدء معالجة: {chat_id} - {source_type} - {quality}")
-            
-            compressed_url = None
-            local_file_to_delete = None
-            
-            # معالجة حسب النوع
-            if source_type == 'url':
-                await app.send_message(chat_id, "⏳ جاري معالجة الرابط...")
-                compressed_url = compress_video(video_source, quality, is_url=True)
-                
-            elif source_type == 'file':
-                if file_size <= MAX_FILE_SIZE:
-                    await app.send_message(chat_id, "📥 جاري تحميل الفيديو...")
-                    
-                    # تحميل الفيديو
-                    timestamp = int(time.time())
-                    temp_filename = f"video_{timestamp}_{user_id}.mp4"
-                    temp_path = os.path.join(TEMP_STORAGE_DIR, temp_filename)
-                    
-                    # استخدام Pyrogram للتحميل (يدعم حتى 2GB!)
-                    message = await app.get_messages(chat_id, video_source)
-                    await message.download(file_name=temp_path)
-                    
-                    print(f"✅ تم التحميل: {temp_path}")
-                    local_file_to_delete = temp_path
-                    
-                    await app.send_message(chat_id, "⏳ جاري ضغط الفيديو...")
-                    compressed_url = compress_video(temp_path, quality, is_url=False)
-                else:
-                    await app.send_message(chat_id, f"❌ الملف كبير جداً ({file_size/(1024*1024):.2f} MB). الحد الأقصى 500MB.")
-            
-            # إرسال النتيجة
-            if compressed_url == "NO_API_KEY_SET":
-                await app.send_message(chat_id, "❌ لم يتم تعيين مفتاح API. أبلغ المشرف.")
-                
-            elif compressed_url:
-                quality_names = {'high': '🔥 عالية', 'medium': '⚖️ متوسطة', 'low': '💾 منخفضة'}
-                caption = f"✅ تم الضغط بنجاح!\n🎬 الجودة: {quality_names.get(quality, 'عادية')}"
-                
-                await app.send_message(chat_id, "📤 جاري إرسال الفيديو...")
-                
-                try:
-                    # تحميل الفيديو المضغوط
-                    timestamp = int(time.time())
-                    compressed_filename = f"compressed_{timestamp}.mp4"
-                    compressed_path = os.path.join(TEMP_STORAGE_DIR, compressed_filename)
-                    
-                    print("📥 تحميل الفيديو المضغوط...")
-                    video_response = requests.get(compressed_url, timeout=300, stream=True)
-                    
-                    with open(compressed_path, 'wb') as f:
-                        for chunk in video_response.iter_content(chunk_size=8192):
-                            if chunk:
-                                f.write(chunk)
-                    
-                    print(f"✅ تم التحميل: {compressed_path}")
-                    
-                    # إرسال باستخدام Pyrogram (يدعم حتى 2GB!)
-                    await app.send_video(
-                        chat_id=chat_id,
-                        video=compressed_path,
-                        caption=caption,
-                        supports_streaming=True
-                    )
-                    
-                    print(f"✅ تم إرسال الفيديو إلى {chat_id}")
-                    
-                    # حذف الملف المضغوط
-                    delete_file_safe(compressed_path)
-                    
-                    increment_video_count(user_id)
-                    
-                except Exception as e:
-                    print(f"❌ خطأ في إرسال الفيديو: {e}")
-                    await app.send_message(chat_id, "❌ فشل إرسال الفيديو. حاول مرة أخرى.")
-            else:
-                await app.send_message(chat_id, "❌ فشل ضغط الفيديو. تحقق من الرابط/الملف.")
-            
-            # حذف أي ملفات محلية متبقية
-            if local_file_to_delete:
-                delete_file_safe(local_file_to_delete)
-            
-            processing_queue.task_done()
-            
-            # تنظيف دوري
-            storage_info = get_storage_info()
-            if storage_info['file_count'] > 5:
-                print("🧹 تنظيف الملفات القديمة...")
-                for file_info in storage_info['files'][:3]:
-                    delete_file_safe(file_info['path'])
-            
-        except Exception as e:
-            print(f"❌ خطأ في المعالجة: {e}")
-            await asyncio.sleep(1)
+        print(f"خطأ في إرسال الرسالة: {e}")
 
 # ==================== أوامر البوت ====================
-async def start_command(client: Client, message: Message):
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """أمر /start"""
-    user = message.from_user
+    user = update.effective_user
     create_user(user.id, user.username)
     
     keyboard_rows = [
@@ -469,28 +201,26 @@ async def start_command(client: Client, message: Message):
     welcome_text = f"""
 🎬 مرحباً {user.first_name}!
 
-أنا بوت ضغط الفيديوهات - **مجاني بالكامل** 🚀
+أنا بوت ضغط الفيديوهات. الآن أنا **مجاني بالكامل وبدون قيود**! 🚀
 
 **🎯 المميزات:**
-✨ معالجة ملفات حتى **500MB** مباشرة
-✨ دعم الروابط الخارجية
+✨ معالجة ملفات حتى 100MB مباشرة
+✨ دعم ملفات تيليجرام والروابط الخارجية
 ✨ 3 مستويات جودة (1080p / 720p / 480p)
-✨ حذف تلقائي للملفات
+✨ حذف تلقائي للملفات بعد الإرسال
 
-📤 أرسل فيديو (حتى 500MB) أو رابط وسأقوم بضغطه!
-
-💡 **ملاحظة:** البوت يستخدم حساب شخصي ويدعم ملفات حتى 500MB!
+📤 أرسل فيديو (حتى 100MB) أو رابط فيديو وسأقوم بضغطه!
 """
     
-    await message.reply_text(welcome_text, reply_markup=reply_markup)
+    await update.message.reply_text(welcome_text, reply_markup=reply_markup)
 
-async def account_command(client: Client, message: Message):
+async def my_account_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """معلومات الحساب"""
-    user_id = message.from_user.id
+    user_id = update.effective_user.id
     user_data = get_user(user_id)
     
     if not user_data:
-        await message.reply_text("يرجى البدء بالأمر /start أولاً")
+        await update.message.reply_text("يرجى البدء بالأمر /start أولاً")
         return
     
     user_id_db, username, total_videos, joined = user_data
@@ -503,34 +233,33 @@ async def account_command(client: Client, message: Message):
 📅 تاريخ الانضمام: {joined.split()[0]}
 """
     
-    await message.reply_text(account_text)
+    await update.message.reply_text(account_text, parse_mode='Markdown')
 
-async def setapikey_command(client: Client, message: Message):
+async def setapikey_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """أمر المشرف لتغيير مفتاح API"""
-    user_id = message.from_user.id
+    user_id = update.effective_user.id
     if user_id != ADMIN_ID:
-        await message.reply_text("❌ هذا الأمر متاح للمشرف فقط.")
+        await update.message.reply_text("❌ هذا الأمر متاح للمشرف فقط.")
         return
 
-    args = message.text.split()[1:] if len(message.text.split()) > 1 else []
-    
+    args = context.args
     if args:
         new_key = args[0]
         set_api_key(new_key)
-        await message.reply_text(f"✅ تم تحديث مفتاح CloudConvert API بنجاح.")
+        await update.message.reply_text(f"✅ تم تحديث مفتاح CloudConvert API بنجاح.", parse_mode='Markdown')
     else:
         current_key = get_api_key()
         if current_key:
             masked_key = '*' * 4 + current_key[-4:] if len(current_key) > 4 else current_key
-            await message.reply_text(f"🔑 مفتاح API الحالي ينتهي بـ: `{masked_key}`\n\n**لتغيير المفتاح:**\n`/setapikey YOUR_NEW_KEY`")
+            await update.message.reply_text(f"🔑 مفتاح API الحالي ينتهي بـ: `{masked_key}`\n\n**لتغيير المفتاح:**\n`/setapikey YOUR_NEW_KEY`", parse_mode='Markdown')
         else:
-            await message.reply_text("❌ لم يتم تعيين مفتاح API")
+            await update.message.reply_text("❌ لم يتم تعيين مفتاح API")
 
-async def stats_command(client: Client, message: Message):
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """إحصائيات البوت"""
-    user_id = message.from_user.id
+    user_id = update.effective_user.id
     if user_id != ADMIN_ID:
-        await message.reply_text("❌ هذا الأمر متاح للمشرف فقط.")
+        await update.message.reply_text("❌ هذا الأمر متاح للمشرف فقط.")
         return
 
     conn = sqlite3.connect('video_bot.db')
@@ -557,13 +286,48 @@ async def stats_command(client: Client, message: Message):
 📦 المساحة المستخدمة: {format_size(storage_info['total_size'])}
 """
     
-    await message.reply_text(stats_text)
+    await update.message.reply_text(stats_text)
 
-async def cleanup_command(client: Client, message: Message):
-    """حذف جميع الملفات المؤقتة (للمشرف)"""
-    user_id = message.from_user.id
+async def files_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """عرض الملفات المؤقتة (للمشرف فقط)"""
+    user_id = update.effective_user.id
     if user_id != ADMIN_ID:
-        await message.reply_text("❌ هذا الأمر متاح للمشرف فقط.")
+        await update.message.reply_text("❌ هذا الأمر متاح للمشرف فقط.")
+        return
+    
+    storage_info = get_storage_info()
+    
+    if storage_info['file_count'] == 0:
+        await update.message.reply_text("✅ لا توجد ملفات مؤقتة. المجلد نظيف! 🧹")
+        return
+    
+    files_text = f"📁 **الملفات المؤقتة ({storage_info['file_count']}):**\n"
+    files_text += f"📦 المساحة الإجمالية: {format_size(storage_info['total_size'])}\n\n"
+    
+    keyboard = []
+    for idx, file_info in enumerate(storage_info['files'][:20]):  # عرض أول 20 ملف
+        file_name = file_info['name']
+        file_size = format_size(file_info['size'])
+        files_text += f"{idx+1}. `{file_name}` - {file_size}\n"
+        
+        # إضافة زر حذف لكل ملف
+        keyboard.append([InlineKeyboardButton(
+            f"🗑️ حذف {file_name[:20]}...",
+            callback_data=f"delete_file_{file_name}"
+        )])
+    
+    # زر حذف الكل
+    keyboard.append([InlineKeyboardButton("🗑️ حذف جميع الملفات", callback_data="delete_all_files")])
+    keyboard.append([InlineKeyboardButton("عودة", callback_data="admin_settings")])
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text(files_text, reply_markup=reply_markup, parse_mode='Markdown')
+
+async def cleanup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """حذف جميع الملفات المؤقتة (للمشرف)"""
+    user_id = update.effective_user.id
+    if user_id != ADMIN_ID:
+        await update.message.reply_text("❌ هذا الأمر متاح للمشرف فقط.")
         return
     
     storage_info = get_storage_info()
@@ -573,28 +337,58 @@ async def cleanup_command(client: Client, message: Message):
         if delete_file_safe(file_info['path']):
             deleted_count += 1
     
-    await message.reply_text(f"✅ تم حذف {deleted_count} ملف من المجلد المؤقت! 🧹")
+    await update.message.reply_text(f"✅ تم حذف {deleted_count} ملف من المجلد المؤقت! 🧹")
 
-# ==================== معالجات الأزرار ====================
-async def button_handler(client: Client, callback_query: CallbackQuery):
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """معالج الأزرار"""
-    query = callback_query
-    user_id = query.from_user.id
+    query = update.callback_query
+    await query.answer()
+    
+    # حذف ملف محدد
+    if query.data.startswith("delete_file_"):
+        if query.from_user.id != ADMIN_ID:
+            await query.edit_message_text("❌ هذه الوظيفة للمشرف فقط.")
+            return
+        
+        file_name = query.data.replace("delete_file_", "")
+        file_path = os.path.join(TEMP_STORAGE_DIR, file_name)
+        
+        if delete_file_safe(file_path):
+            await query.edit_message_text(f"✅ تم حذف الملف: {file_name}")
+        else:
+            await query.edit_message_text(f"❌ فشل حذف الملف: {file_name}")
+        return
+    
+    # حذف جميع الملفات
+    if query.data == "delete_all_files":
+        if query.from_user.id != ADMIN_ID:
+            await query.edit_message_text("❌ هذه الوظيفة للمشرف فقط.")
+            return
+        
+        storage_info = get_storage_info()
+        deleted_count = 0
+        
+        for file_info in storage_info['files']:
+            if delete_file_safe(file_info['path']):
+                deleted_count += 1
+        
+        await query.edit_message_text(f"✅ تم حذف {deleted_count} ملف! 🧹")
+        return
     
     # معالجة اختيار الجودة للفيديوهات المرسلة كملف
     if query.data.startswith("quality_") and not query.data.startswith("quality_url_"):
         quality = query.data.replace("quality_", "")
         
-        if user_id not in user_data or 'pending_video' not in user_data[user_id]:
+        if 'pending_video' not in context.user_data:
             await query.edit_message_text("❌ لم يتم العثور على فيديو.")
             return
         
-        video_info = user_data[user_id]['pending_video']
+        video_info = context.user_data['pending_video']
         chat_id = video_info['chat_id']
-        message_id = video_info['message_id']
+        file_id = video_info['file_id']
         file_size = video_info['file_size']
         
-        del user_data[user_id]['pending_video']
+        del context.user_data['pending_video']
         
         quality_names = {
             'high': '🔥 عالية (1080p)',
@@ -613,9 +407,8 @@ async def button_handler(client: Client, callback_query: CallbackQuery):
         
         await processing_queue.put({
             'chat_id': chat_id,
-            'user_id': user_id,
-            'source': message_id,
-            'type': 'file',
+            'source': file_id,
+            'type': 'file_id',
             'file_size': file_size,
             'quality': quality
         })
@@ -625,15 +418,15 @@ async def button_handler(client: Client, callback_query: CallbackQuery):
     if query.data.startswith("quality_url_"):
         quality = query.data.replace("quality_url_", "")
         
-        if user_id not in user_data or 'pending_video' not in user_data[user_id] or 'url' not in user_data[user_id]['pending_video']:
+        if 'pending_video' not in context.user_data or 'url' not in context.user_data['pending_video']:
             await query.edit_message_text("❌ لم يتم العثور على رابط.")
             return
         
-        video_info = user_data[user_id]['pending_video']
+        video_info = context.user_data['pending_video']
         chat_id = video_info['chat_id']
         url = video_info['url']
         
-        del user_data[user_id]['pending_video']
+        del context.user_data['pending_video']
         
         quality_names = {
             'high': '🔥 عالية (1080p)',
@@ -652,7 +445,6 @@ async def button_handler(client: Client, callback_query: CallbackQuery):
         
         await processing_queue.put({
             'chat_id': chat_id,
-            'user_id': user_id,
             'source': url,
             'type': 'url',
             'file_size': 0,
@@ -660,45 +452,15 @@ async def button_handler(client: Client, callback_query: CallbackQuery):
         })
         return
     
-    # حذف ملف محدد
-    if query.data.startswith("delete_file_"):
-        if user_id != ADMIN_ID:
-            await query.edit_message_text("❌ هذه الوظيفة للمشرف فقط.")
-            return
-        
-        file_name = query.data.replace("delete_file_", "")
-        file_path = os.path.join(TEMP_STORAGE_DIR, file_name)
-        
-        if delete_file_safe(file_path):
-            await query.edit_message_text(f"✅ تم حذف الملف: {file_name}")
-        else:
-            await query.edit_message_text(f"❌ فشل حذف الملف: {file_name}")
-        return
-    
-    # حذف جميع الملفات
-    if query.data == "delete_all_files":
-        if user_id != ADMIN_ID:
-            await query.edit_message_text("❌ هذه الوظيفة للمشرف فقط.")
-            return
-        
-        storage_info = get_storage_info()
-        deleted_count = 0
-        
-        for file_info in storage_info['files']:
-            if delete_file_safe(file_info['path']):
-                deleted_count += 1
-        
-        await query.edit_message_text(f"✅ تم حذف {deleted_count} ملف! 🧹")
-        return
-    
     if query.data == "my_account":
-        user_data_db = get_user(user_id)
+        user_id = query.from_user.id
+        user_data = get_user(user_id)
         
-        if not user_data_db:
+        if not user_data:
             await query.edit_message_text("يرجى البدء بالأمر /start أولاً")
             return
         
-        user_id_db, username, total_videos, joined = user_data_db
+        user_id_db, username, total_videos, joined = user_data
         
         account_text = f"""
 👤 **معلومات حسابك**
@@ -708,39 +470,36 @@ async def button_handler(client: Client, callback_query: CallbackQuery):
 📅 تاريخ الانضمام: {joined.split()[0]}
 """
         keyboard_rows = [[InlineKeyboardButton("عودة", callback_data="start_menu")]]
-        if user_id == ADMIN_ID:
+        if query.from_user.id == ADMIN_ID:
              keyboard_rows.insert(0, [InlineKeyboardButton("⚙️ إعدادات المشرف", callback_data="admin_settings")])
         
         reply_markup = InlineKeyboardMarkup(keyboard_rows)
-        await query.edit_message_text(account_text, reply_markup=reply_markup)
+        await query.edit_message_text(account_text, reply_markup=reply_markup, parse_mode='Markdown')
     
     elif query.data == "help":
         help_text = """
 ℹ️ **كيفية الاستخدام:**
 
-**1. ملفات مباشرة (حتى 500MB):**
+**1. ملفات تيليجرام (حتى 100MB):**
 1️⃣ أرسل فيديو مباشرة للبوت
 2️⃣ اختر جودة الضغط
 3️⃣ انتظر حتى يتم الضغط والإرسال
 
-**2. الروابط الخارجية (حتى 500MB):**
-1️⃣ ارفع الفيديو على Google Drive/Dropbox
-2️⃣ احصل على رابط التحميل المباشر
-3️⃣ أرسل الرابط للبوت
-4️⃣ اختر جودة الضغط
+**2. الروابط الخارجية:**
+1️⃣ أرسل رابط مباشر للفيديو
+2️⃣ اختر جودة الضغط
+3️⃣ انتظر المعالجة
 
 🎬 **مستويات الجودة:**
 🔥 عالية: 1080p - أفضل جودة
 ⚖️ متوسطة: 720p - توازن مثالي
 💾 منخفضة: 480p - أقل حجم
 
-💡 **ميزة جديدة:** البوت يستخدم حساب شخصي ويدعم ملفات حتى 500MB!
-
 🗑️ **ملاحظة:** يتم حذف جميع الملفات تلقائياً بعد الإرسال لتوفير المساحة.
 """
         await query.edit_message_text(help_text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("عودة", callback_data="start_menu")]]))
     
-    elif query.data == "admin_settings" and user_id == ADMIN_ID:
+    elif query.data == "admin_settings" and query.from_user.id == ADMIN_ID:
         storage_info = get_storage_info()
         admin_text = f"""
 👑 **لوحة تحكم المشرف**
@@ -759,7 +518,7 @@ async def button_handler(client: Client, callback_query: CallbackQuery):
         ]
         await query.edit_message_text(admin_text, reply_markup=InlineKeyboardMarkup(keyboard))
     
-    elif query.data == "admin_view_files" and user_id == ADMIN_ID:
+    elif query.data == "admin_view_files" and query.from_user.id == ADMIN_ID:
         storage_info = get_storage_info()
         
         if storage_info['file_count'] == 0:
@@ -787,9 +546,9 @@ async def button_handler(client: Client, callback_query: CallbackQuery):
         keyboard.append([InlineKeyboardButton("عودة", callback_data="admin_settings")])
         
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.edit_message_text(files_text, reply_markup=reply_markup)
+        await query.edit_message_text(files_text, reply_markup=reply_markup, parse_mode='Markdown')
         
-    elif query.data == "admin_set_api_key" and user_id == ADMIN_ID:
+    elif query.data == "admin_set_api_key" and query.from_user.id == ADMIN_ID:
         current_key = get_api_key()
         if current_key:
             masked_key = '*' * 4 + current_key[-4:] if len(current_key) > 4 else current_key
@@ -798,9 +557,9 @@ async def button_handler(client: Client, callback_query: CallbackQuery):
             response_text = "❌ لم يتم تعيين مفتاح API\n\n**لتعيين المفتاح:**\n`/setapikey YOUR_NEW_KEY`"
             
         keyboard = [[InlineKeyboardButton("عودة", callback_data="admin_settings")]]
-        await query.edit_message_text(response_text, reply_markup=InlineKeyboardMarkup(keyboard))
+        await query.edit_message_text(response_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
 
-    elif query.data == "admin_stats" and user_id == ADMIN_ID:
+    elif query.data == "admin_stats" and query.from_user.id == ADMIN_ID:
         conn = sqlite3.connect('video_bot.db')
         c = conn.cursor()
         c.execute('SELECT COUNT(*) FROM users')
@@ -842,7 +601,7 @@ async def button_handler(client: Client, callback_query: CallbackQuery):
 أنا بوت ضغط الفيديوهات - **مجاني بالكامل** 🚀
 
 **🎯 المميزات:**
-✨ معالجة ملفات حتى 500MB
+✨ معالجة ملفات حتى 100MB
 ✨ دعم الروابط الخارجية
 ✨ 3 مستويات جودة
 ✨ حذف تلقائي للملفات
@@ -850,19 +609,354 @@ async def button_handler(client: Client, callback_query: CallbackQuery):
 📤 أرسل فيديو أو رابط للبدء!
 """
         await query.edit_message_text(welcome_text, reply_markup=reply_markup)
-    
-    await query.answer()
 
-# ==================== معالجات الفيديو والروابط ====================
-async def handle_video(client: Client, message: Message):
-    """معالج الفيديو"""
-    user_id = message.from_user.id
-    chat_id = message.chat.id
+# ==================== معالجة الفيديو ====================
+async def download_file_from_telegram(context, file_id: str, file_size: int) -> Optional[str]:
+    """تحميل ملف من تليجرام إلى التخزين المؤقت"""
+    try:
+        print(f"📥 تحميل من Telegram... الحجم: {file_size / (1024*1024):.2f} MB")
+        
+        file = await context.bot.get_file(file_id)
+        
+        # حفظ في مجلد التخزين المؤقت
+        timestamp = int(time.time())
+        temp_filename = f"video_{timestamp}_{file_id[:10]}.mp4"
+        temp_path = os.path.join(TEMP_STORAGE_DIR, temp_filename)
+        
+        await file.download_to_drive(temp_path)
+        print(f"✅ تم التحميل: {temp_path}")
+        
+        return temp_path
+        
+    except Exception as e:
+        print(f"❌ خطأ في التحميل: {e}")
+        return None
+
+def get_quality_settings(quality: str) -> dict:
+    """الحصول على إعدادات الجودة"""
+    if quality == 'high':
+        return {
+            "crf": 23,
+            "preset": "medium",
+            "width": 1920,
+            "height": 1080,
+            "audio_bitrate": 128,
+            "audio_frequency": 44100,
+            "audio_channels": 2,
+            "fps": 30
+        }
+    elif quality == 'medium':
+        return {
+            "crf": 28,
+            "preset": "slow",
+            "width": 1280,
+            "height": 720,
+            "audio_bitrate": 96,
+            "audio_frequency": 44100,
+            "audio_channels": 2,
+            "fps": 30
+        }
+    else:  # low
+        return {
+            "crf": 40,
+            "preset": "veryslow",
+            "width": 854,
+            "height": 480,
+            "audio_bitrate": 48,
+            "audio_frequency": 22050,
+            "audio_channels": 1,
+            "fps": 24
+        }
+
+def compress_video(video_source: str, chat_id: str, context, quality: str = 'low', is_url: bool = True) -> Optional[str]:
+    """ضغط الفيديو باستخدام CloudConvert"""
+    api_key = get_api_key()
+    if not api_key:
+        return "NO_API_KEY_SET"
+
+    try:
+        headers = {"Authorization": f"Bearer {api_key}"}
+        settings = get_quality_settings(quality)
+        
+        # تحديد حمولة Job
+        if is_url:
+            job_payload = {
+                "tasks": {
+                    "import-video": {"operation": "import/url", "url": video_source, "filename": "video.mp4"},
+                    "compress-video": {
+                        "operation": "convert", "input": "import-video", "output_format": "mp4",
+                        "video_codec": "x264", "crf": settings["crf"], "preset": settings["preset"],
+                        "width": settings["width"], "height": settings["height"],
+                        "audio_codec": "aac", "audio_bitrate": settings["audio_bitrate"], 
+                        "audio_frequency": settings["audio_frequency"], "audio_channels": settings["audio_channels"], 
+                        "strip_metadata": True, "fps": settings["fps"]
+                    },
+                    "export-video": {"operation": "export/url", "input": "compress-video"}
+                }
+            }
+        else:
+            job_payload = {
+                "tasks": {
+                    "import-video": {"operation": "import/upload"},
+                    "compress-video": {
+                        "operation": "convert", "input": "import-video", "output_format": "mp4",
+                        "video_codec": "x264", "crf": settings["crf"], "preset": settings["preset"],
+                        "width": settings["width"], "height": settings["height"],
+                        "audio_codec": "aac", "audio_bitrate": settings["audio_bitrate"], 
+                        "audio_frequency": settings["audio_frequency"], "audio_channels": settings["audio_channels"], 
+                        "strip_metadata": True, "fps": settings["fps"]
+                    },
+                    "export-video": {"operation": "export/url", "input": "compress-video"}
+                }
+            }
+        
+        response = requests.post(
+            "https://api.cloudconvert.com/v2/jobs",
+            json=job_payload,
+            headers=headers
+        )
+        
+        if response.status_code != 201:
+            print(f"❌ فشل إنشاء Job: {response.text}")
+            return None
+            
+        job_data = response.json()["data"]
+        job_id = job_data["id"]
+        
+        # رفع الملف إذا كان محلياً
+        if not is_url:
+            import_task = next((t for t in job_data["tasks"] if t["name"] == "import-video"), None)
+            if not import_task:
+                return None
+            
+            upload_url = import_task["result"]["form"]["url"]
+            upload_params = import_task["result"]["form"]["parameters"]
+            
+            with open(video_source, 'rb') as f:
+                files = {'file': f}
+                upload_response = requests.post(upload_url, data=upload_params, files=files)
+            
+            if upload_response.status_code not in [200, 201]:
+                print(f"❌ فشل رفع الملف: {upload_response.text}")
+                return None
+            
+            print("✅ تم رفع الملف لـ CloudConvert")
+            
+            # حذف الملف المحلي فوراً بعد الرفع
+            delete_file_safe(video_source)
+        
+        # انتظار اكتمال المعالجة
+        max_attempts = 180
+        attempt = 0
+        
+        while attempt < max_attempts:
+            job_status = requests.get(
+                f"https://api.cloudconvert.com/v2/jobs/{job_id}",
+                headers=headers
+            ).json()
+            
+            status = job_status["data"]["status"]
+            
+            if status == "finished":
+                tasks = job_status["data"]["tasks"]
+                export_task = next((t for t in tasks if t["name"] == "export-video"), None)
+                
+                if export_task and export_task.get("result") and export_task["result"].get("files"):
+                    download_url = export_task["result"]["files"][0]["url"]
+                    file_size = export_task["result"]["files"][0].get("size", 0)
+                    file_size_mb = file_size / (1024*1024)
+                    print(f"✅ اكتمل الضغط! الحجم: {file_size_mb:.2f} MB")
+                    return download_url
+                    
+            elif status == "error":
+                print(f"❌ خطأ في المعالجة: {job_status}")
+                return None
+                
+            time.sleep(5)
+            attempt += 1
+        
+        print("❌ انتهى الوقت")
+        return None
+        
+    except Exception as e:
+        print(f"❌ خطأ: {e}")
+        return None
+
+def send_compressed_video_advanced(chat_id: str, video_url: str, caption: str = "✅ تم ضغط الفيديو!") -> tuple:
+    """إرسال الفيديو المضغوط مع حذف تلقائي"""
+    temp_file_path = None
+    max_retries = 3
     
-    if message.video:
-        file_size = message.video.file_size
-    elif message.document and message.document.mime_type and message.document.mime_type.startswith("video/"):
-        file_size = message.document.file_size
+    for attempt in range(max_retries):
+        try:
+            print(f"📤 محاولة الإرسال ({attempt + 1}/{max_retries})...")
+            send_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendVideo"
+            
+            # محاولة الإرسال المباشر أولاً
+            response = requests.post(
+                send_url,
+                data={
+                    "chat_id": chat_id,
+                    "video": video_url,
+                    "caption": caption,
+                    "supports_streaming": True
+                },
+                timeout=600
+            )
+            
+            if response.status_code == 200:
+                print(f"✅ نجح الإرسال المباشر")
+                return True, None
+            else:
+                print(f"⚠️ فشل الإرسال المباشر: {response.status_code}")
+                
+        except Exception as e:
+            print(f"❌ خطأ في الإرسال المباشر: {e}")
+        
+        # التحميل والإرسال المحلي
+        if attempt == max_retries - 1:
+            try:
+                print("🔄 جاري التحميل المحلي...")
+                
+                # تحميل الفيديو
+                video_response = requests.get(video_url, timeout=300, stream=True)
+                
+                if video_response.status_code != 200:
+                    print(f"❌ فشل تحميل الفيديو: {video_response.status_code}")
+                    return False, None
+                
+                # حفظ في المجلد المؤقت
+                timestamp = int(time.time())
+                temp_filename = f"compressed_{timestamp}.mp4"
+                temp_file_path = os.path.join(TEMP_STORAGE_DIR, temp_filename)
+                
+                with open(temp_file_path, 'wb') as temp_file:
+                    for chunk in video_response.iter_content(chunk_size=8192):
+                        if chunk:
+                            temp_file.write(chunk)
+                
+                file_size_mb = os.path.getsize(temp_file_path) / (1024*1024)
+                print(f"✅ تم التحميل المحلي: {file_size_mb:.2f} MB")
+                
+                # إرسال الملف
+                print("📤 جاري إرسال الملف المحلي...")
+                with open(temp_file_path, 'rb') as video_file:
+                    files = {'video': video_file}
+                    data = {'chat_id': chat_id, 'caption': caption, 'supports_streaming': True}
+                    
+                    response = requests.post(send_url, data=data, files=files, timeout=600)
+                
+                if response.status_code == 200:
+                    print("✅ نجح إرسال الملف المحلي!")
+                    return True, temp_file_path
+                else:
+                    print(f"❌ فشل إرسال الملف: {response.status_code}")
+                    return False, temp_file_path
+                    
+            except Exception as e:
+                print(f"❌ خطأ في الإرسال المحلي: {e}")
+                return False, temp_file_path
+        
+        if attempt < max_retries - 1:
+            time.sleep(5)
+    
+    return False, temp_file_path
+
+async def process_video_queue(context):
+    """معالج طابور الفيديو"""
+    global is_processing
+    
+    while True:
+        try:
+            video_data = await processing_queue.get()
+            
+            is_processing = True
+            chat_id = video_data['chat_id']
+            user_id = int(chat_id)
+            video_source = video_data['source']
+            source_type = video_data['type']
+            file_size = video_data.get('file_size', 0)
+            quality = video_data.get('quality', 'low')
+            
+            print(f"🎬 بدء معالجة: {chat_id} - {source_type} - {quality}")
+            
+            compressed_url = None
+            local_file_to_delete = None
+            
+            # معالجة حسب النوع
+            if source_type == 'url':
+                await send_message(chat_id, "⏳ جاري معالجة الرابط...", context)
+                compressed_url = compress_video(video_source, chat_id, context, quality, is_url=True)
+                
+            elif source_type == 'file_id':
+                if file_size <= MAX_FILE_SIZE:
+                    await send_message(chat_id, "📥 جاري تحميل الفيديو...", context)
+                    local_file = await download_file_from_telegram(context, video_source, file_size)
+                    
+                    if local_file:
+                        local_file_to_delete = local_file
+                        await send_message(chat_id, "⏳ جاري ضغط الفيديو...", context)
+                        compressed_url = compress_video(local_file, chat_id, context, quality, is_url=False)
+                    else:
+                        await send_message(chat_id, "❌ فشل تحميل الفيديو.", context)
+                else:
+                    await send_message(chat_id, f"❌ الملف كبير جداً ({file_size/(1024*1024):.2f} MB). الحد الأقصى 100MB.", context)
+            
+            # إرسال النتيجة
+            if compressed_url == "NO_API_KEY_SET":
+                await send_message(chat_id, "❌ لم يتم تعيين مفتاح API. أبلغ المشرف.", context)
+                
+            elif compressed_url:
+                quality_names = {'high': '🔥 عالية', 'medium': '⚖️ متوسطة', 'low': '💾 منخفضة'}
+                caption = f"✅ تم الضغط بنجاح!\n🎬 الجودة: {quality_names.get(quality, 'عادية')}"
+                
+                await send_message(chat_id, "📤 جاري إرسال الفيديو...", context)
+                
+                send_success, temp_file = send_compressed_video_advanced(chat_id, compressed_url, caption)
+                
+                # حذف الملف المؤقت فوراً بعد الإرسال
+                if temp_file:
+                    delete_file_safe(temp_file)
+                
+                if send_success:
+                    increment_video_count(user_id)
+                    print(f"✅ تم إرسال الفيديو إلى {chat_id}")
+                    
+                    # تنظيف أي ملفات متبقية
+                    await asyncio.sleep(2)
+                    storage_info = get_storage_info()
+                    if storage_info['file_count'] > 5:
+                        print("🧹 تنظيف الملفات القديمة...")
+                        for file_info in storage_info['files'][:3]:
+                            delete_file_safe(file_info['path'])
+                else:
+                    await send_message(chat_id, "❌ فشل إرسال الفيديو. حاول مرة أخرى.", context)
+            else:
+                await send_message(chat_id, "❌ فشل ضغط الفيديو. تحقق من الإعدادات.", context)
+            
+            # حذف أي ملفات محلية متبقية
+            if local_file_to_delete:
+                delete_file_safe(local_file_to_delete)
+            
+            processing_queue.task_done()
+            is_processing = False
+            
+        except Exception as e:
+            print(f"❌ خطأ في المعالجة: {e}")
+            is_processing = False
+            await asyncio.sleep(1)
+
+async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """معالج الفيديو"""
+    user_id = update.effective_user.id
+    chat_id = str(update.effective_chat.id)
+    
+    if update.message.video:
+        file_id = update.message.video.file_id
+        file_size = update.message.video.file_size
+    elif update.message.document and update.message.document.mime_type and update.message.document.mime_type.startswith("video/"):
+        file_id = update.message.document.file_id
+        file_size = update.message.document.file_size
     else:
         return
     
@@ -870,14 +964,11 @@ async def handle_video(client: Client, message: Message):
     print(f"📹 فيديو من {user_id} - {file_size_mb:.2f} MB")
     
     if file_size > MAX_FILE_SIZE:
-        await message.reply_text(f"❌ الملف كبير جداً ({file_size_mb:.2f} MB)\n\n📏 الحد الأقصى: 500MB\n💡 لكن يمكنك رفع الملف لـ Google Drive وإرسال الرابط!")
+        await update.message.reply_text(f"❌ الملف كبير جداً ({file_size_mb:.2f} MB)\n\n📏 الحد الأقصى: 100MB\n💡 استخدم رابط خارجي للملفات الأكبر.")
         return
     
-    if user_id not in user_data:
-        user_data[user_id] = {}
-    
-    user_data[user_id]['pending_video'] = {
-        'message_id': message.id,
+    context.user_data['pending_video'] = {
+        'file_id': file_id,
         'file_size': file_size,
         'chat_id': chat_id
     }
@@ -893,23 +984,22 @@ async def handle_video(client: Client, message: Message):
 🎬 **اختر جودة الضغط:**
 
 📹 حجم الفيديو: {file_size_mb:.2f} MB
-📏 الحد الأقصى: 500MB
 
 اختر الجودة المناسبة 👇
 """
     
-    await message.reply_text(quality_text, reply_markup=reply_markup)
+    await update.message.reply_text(quality_text, reply_markup=reply_markup)
 
-async def handle_url(client: Client, message: Message):
+async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """معالج الروابط"""
-    user_id = message.from_user.id
-    chat_id = message.chat.id
-    url = message.text.strip()
+    user_id = update.effective_user.id
+    chat_id = str(update.effective_chat.id)
+    url = update.message.text.strip()
     
     if not url.startswith(('http://', 'https://')):
         return
     
-    video_sites = ['.mp4', '.avi', '.mov', '.mkv', '.webm', 'drive.google.com', 'dropbox.com', 'mega.nz', 'mediafire.com']
+    video_sites = ['.mp4', '.avi', '.mov', 'drive.google.com', 'dropbox.com', 'mega.nz']
     is_likely_video = any(site in url.lower() for site in video_sites)
     
     if not is_likely_video:
@@ -917,10 +1007,7 @@ async def handle_url(client: Client, message: Message):
     
     print(f"🔗 رابط من {user_id}: {url}")
     
-    if user_id not in user_data:
-        user_data[user_id] = {}
-    
-    user_data[user_id]['pending_video'] = {
+    context.user_data['pending_video'] = {
         'url': url,
         'chat_id': chat_id
     }
@@ -932,16 +1019,7 @@ async def handle_url(client: Client, message: Message):
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
-    url_text = """
-🎬 **اختر جودة الضغط:**
-
-🔗 الرابط: تم استلامه
-📏 الحد الأقصى: 500MB
-
-اختر الجودة المناسبة 👇
-"""
-    
-    await message.reply_text(url_text, reply_markup=reply_markup)
+    await update.message.reply_text("🎬 **اختر جودة الضغط:**", reply_markup=reply_markup)
 
 # ==================== البرنامج الرئيسي ====================
 def main():
@@ -957,40 +1035,32 @@ def main():
     
     print("✅ النظام جاهز")
     
-    # إنشاء تطبيق Pyrogram
-    app = Client(
-        SESSION_NAME,
-        api_id=API_ID,
-        api_hash=API_HASH,
-        bot_token=BOT_TOKEN
-    )
+    # إنشاء التطبيق
+    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     
-    # إضافة المعالجات
-    app.on_message(filters.command("start"))(start_command)
-    app.on_message(filters.command("account"))(account_command)
-    app.on_message(filters.command("setapikey"))(setapikey_command)
-    app.on_message(filters.command("stats"))(stats_command)
-    app.on_message(filters.command("cleanup"))(cleanup_command)
-    app.on_callback_query()(button_handler)
-    app.on_message(filters.video | filters.document)(handle_video)
-    app.on_message(filters.text & ~filters.command)(handle_url)
+    # المعالجات
+    application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(CommandHandler("account", my_account_command))
+    application.add_handler(CommandHandler("setapikey", setapikey_command))
+    application.add_handler(CommandHandler("stats", stats_command))
+    application.add_handler(CommandHandler("files", files_command))
+    application.add_handler(CommandHandler("cleanup", cleanup_command))
+    application.add_handler(CallbackQueryHandler(button_handler))
+    application.add_handler(MessageHandler(filters.VIDEO | filters.Document.VIDEO, handle_video))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_url))
+    
+    # بدء معالج الطابور
+    application.job_queue.run_once(
+        lambda context: asyncio.create_task(process_video_queue(context)),
+        when=0
+    )
     
     print("✅ البوت يعمل الآن...")
     print(f"👑 معرف المشرف: {ADMIN_ID}")
     print(f"📦 الحد الأقصى للملفات: {MAX_FILE_SIZE/(1024*1024):.0f} MB")
-    print(f"🎯 نوع البوت: User Bot (حساب شخصي)")
-    
-    # تشغيل معالج الطابور
-    async def start_queue_processor():
-        await process_video_queue(app)
     
     # تشغيل البوت
-    async def run_bot():
-        await app.start()
-        asyncio.create_task(start_queue_processor())
-        await asyncio.Event().wait()
-    
-    asyncio.run(run_bot())
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == '__main__':
     main()
