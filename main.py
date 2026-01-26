@@ -1,1066 +1,247 @@
-import requests
-import time
-import sqlite3
-import asyncio
-import os
-import tempfile
-import shutil
-from pathlib import Path
-from typing import Optional
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+ملف مدمج - 1 بوت
+تم الدمج تلقائياً من جميع ملفات .py
+مع Flask - للاستضافات التي تسمح بـ Webserver
+"""
+import os, sys, threading, time, base64
+import types
+from flask import Flask, jsonify
 from datetime import datetime
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    CallbackQueryHandler,
-    MessageHandler,
-    filters,
-    ContextTypes,
-)
 
-# ==================== الإعدادات الثابتة ====================
-TELEGRAM_BOT_TOKEN = "7871583760:AAEAj1NMlgMU7H8Y3To3a7lGvShVZ74BvzU"
-ADMIN_ID = 1058616316
-TELEGRAM_API_LIMIT = 20 * 1024 * 1024  # 20MB
-MAX_FILE_SIZE = 500 * 1024 * 1024  # 100MB الحد الأقصى الجديد
+# Flask Application
+app = Flask(__name__)
 
-# مجلد التخزين المؤقت
-TEMP_STORAGE_DIR = "temp_videos"
+# متغير لحفظ حالة البوتات
+bots_status = {}
+start_time = None
 
-# طابور المعالجة
-processing_queue = asyncio.Queue()
-is_processing = False
-
-# ==================== إدارة الملفات ====================
-def init_temp_storage():
-    """إنشاء مجلد التخزين المؤقت"""
-    if not os.path.exists(TEMP_STORAGE_DIR):
-        os.makedirs(TEMP_STORAGE_DIR)
-    print(f"✅ مجلد التخزين المؤقت: {TEMP_STORAGE_DIR}")
-
-def cleanup_old_files():
-    """حذف جميع الملفات القديمة عند بدء التشغيل"""
-    try:
-        if os.path.exists(TEMP_STORAGE_DIR):
-            for file in os.listdir(TEMP_STORAGE_DIR):
-                file_path = os.path.join(TEMP_STORAGE_DIR, file)
-                try:
-                    if os.path.isfile(file_path):
-                        os.unlink(file_path)
-                        print(f"🗑️ حذف ملف قديم: {file}")
-                except Exception as e:
-                    print(f"⚠️ فشل حذف {file}: {e}")
-        print("✅ تم تنظيف المجلد من الملفات القديمة")
-    except Exception as e:
-        print(f"❌ خطأ في التنظيف: {e}")
-
-def delete_file_safe(file_path: str):
-    """حذف ملف بشكل آمن"""
-    try:
-        if os.path.exists(file_path):
-            os.unlink(file_path)
-            print(f"🗑️ تم حذف الملف: {file_path}")
-            return True
-    except Exception as e:
-        print(f"⚠️ فشل حذف الملف {file_path}: {e}")
-    return False
-
-def get_storage_info():
-    """الحصول على معلومات المساحة التخزينية"""
-    try:
-        total_size = 0
-        file_count = 0
-        files_list = []
-        
-        if os.path.exists(TEMP_STORAGE_DIR):
-            for file in os.listdir(TEMP_STORAGE_DIR):
-                file_path = os.path.join(TEMP_STORAGE_DIR, file)
-                if os.path.isfile(file_path):
-                    size = os.path.getsize(file_path)
-                    total_size += size
-                    file_count += 1
-                    files_list.append({
-                        'name': file,
-                        'size': size,
-                        'path': file_path
-                    })
-        
-        return {
-            'total_size': total_size,
-            'file_count': file_count,
-            'files': files_list
-        }
-    except Exception as e:
-        print(f"❌ خطأ في الحصول على معلومات التخزين: {e}")
-        return {'total_size': 0, 'file_count': 0, 'files': []}
-
-def format_size(size_bytes):
-    """تحويل الحجم إلى صيغة قابلة للقراءة"""
-    for unit in ['B', 'KB', 'MB', 'GB']:
-        if size_bytes < 1024.0:
-            return f"{size_bytes:.2f} {unit}"
-        size_bytes /= 1024.0
-    return f"{size_bytes:.2f} TB"
-
-# ==================== قاعدة البيانات ====================
-def init_database():
-    """إنشاء قاعدة البيانات وجداول المستخدمين والإعدادات"""
-    conn = sqlite3.connect('video_bot.db')
-    c = conn.cursor()
+@app.route("/")
+def home():
+    """الصفحة الرئيسية - تعرض حالة البوتات"""
+    uptime = ""
+    if start_time:
+        delta = datetime.now() - start_time
+        hours = delta.seconds // 3600
+        minutes = (delta.seconds % 3600) // 60
+        uptime = f"{delta.days}d {hours}h {minutes}m"
     
-    c.execute('''CREATE TABLE IF NOT EXISTS users (
-        user_id INTEGER PRIMARY KEY,
-        username TEXT,
-        total_videos INTEGER DEFAULT 0,
-        joined_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )''')
-    
-    c.execute('''CREATE TABLE IF NOT EXISTS settings (
-        key TEXT PRIMARY KEY,
-        value TEXT
-    )''')
-    
-    c.execute("SELECT value FROM settings WHERE key = 'api_key'")
-    if c.fetchone() is None:
-        default_api_key = "eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiJ9.eyJhdWQiOiIxIiwianRpIjoiZjE0N2NmNDU0ZjAzZTMzNDAwNTFlZGQ4MzFmY2JhZDMyOTM0N2FiMWM0M2RkMTRmMGNmZjlkZDAzNzQxNzE2NzdmMmY5M2EyNmFmYzI2YTgiLCJpYXQiOjE3NjQxNTUxMzQuMjkyNjQ0LCJuYmYiOjE3NjQxNTUxMzQuMjkyNjQ1LCJleHAiOjQ5MTk4Mjg3MzQuMjg1MTA3LCJzdWIiOiI3MzU3NTUyMSIsInNjb3BlcyI6WyJ0YXNrLndyaXRlIiwidGFzay5yZWFkZCJ9.ggolEBtldJIZq74R1H3SI61AHTPc4iJRvugBAWY9mAoQOW3rbaUrQHf8CTDuRYNf6pm0xpmAgcFn6SrTbw16-zEERYc11qvOHGY5qXQok_aiFyj2GokGTzbf3nhdhswZPmtAj69WljWcggt6X-9iwTyChDXKqC7U6EjeA2aW6XptX5RtuK9xXF_NASJetc7qiWX1r8KzdiwhbFJok4bI3i9d8VV-dItDWXZJ3euFfPc-lzOhqwDf2ZEA1wPg20Bi6gd0IE2PgVQpKynZyFktu8WNPNVzhnOH0yE1Ya6oehvJagX4tmn7gx1mfjrOJjtqAD2Eg2F-8Dl7gd86fhexOKe0BewfLNU1FU6rniUH3jTdLJfAjL8O6QsuuLeJXG9E2s5mFpGsqxqB7LMC_GXN27Dm44kjmHoB48m6zWYQsZ751DHSJ8rjVR-BzcS9AjQegYW08nInRhY2UfINrqNbfu7U69sdl4L09ZuVIEAGljE2ktcQCqyHCqxi4kHipLa6q-WRFv_5bDIpWkF6BHUjeEQYVN0_F-bze1c8qiX6m7nQNHbmGhIaCUim7NHEI9sz5bvJNLKc98VctRanyeJvy-YL9ZcP--16Sw-kj1ydT743mB4Nt0AKSf7A9KwMpKWciPWkvq6Cesj6eMTtS3HSN0WvwhhOQ20zcDCxWjnm16k"
-        c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('api_key', ?)", (default_api_key,))
-    
-    conn.commit()
-    conn.close()
+    html = f"""
+    <!DOCTYPE html>
+    <html dir="rtl" lang="ar">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>🤖 حالة البوتات - 1 بوت</title>
+        <style>
+            * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+            body {{
+                font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                min-height: 100vh;
+                padding: 20px;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+            }}
+            .container {{
+                background: white;
+                border-radius: 20px;
+                box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+                padding: 40px;
+                max-width: 800px;
+                width: 100%;
+            }}
+            h1 {{
+                color: #667eea;
+                text-align: center;
+                margin-bottom: 10px;
+                font-size: 2.5em;
+            }}
+            .uptime {{
+                text-align: center;
+                color: #666;
+                margin-bottom: 30px;
+                font-size: 1.1em;
+            }}
+            .status {{
+                background: #f0f9ff;
+                border-radius: 15px;
+                padding: 25px;
+                margin-bottom: 20px;
+                border-right: 5px solid #10b981;
+            }}
+            .status h2 {{
+                color: #10b981;
+                margin-bottom: 15px;
+                font-size: 1.5em;
+            }}
+            .bot-item {{
+                background: white;
+                padding: 15px;
+                margin: 10px 0;
+                border-radius: 10px;
+                display: flex;
+                align-items: center;
+                box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+            }}
+            .bot-icon {{
+                font-size: 2em;
+                margin-left: 15px;
+            }}
+            .bot-info {{
+                flex: 1;
+            }}
+            .bot-name {{
+                font-weight: bold;
+                color: #333;
+                font-size: 1.1em;
+            }}
+            .bot-status {{
+                color: #10b981;
+                font-size: 0.9em;
+                margin-top: 5px;
+            }}
+            .footer {{
+                text-align: center;
+                margin-top: 30px;
+                color: #666;
+                font-size: 0.9em;
+            }}
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>🤖 نظام إدارة البوتات</h1>
+            <div class="uptime">⏱️ وقت التشغيل: {uptime}</div>
+            
+            <div class="status">
+                <h2>✅ جميع البوتات تعمل (1 بوت)</h2>
+                <div class="bot-item">
+                    <div class="bot-icon">🤖</div>
+                    <div class="bot-info">
+                        <div class="bot-name">1.py</div>
+                        <div class="bot-status">✓ يعمل بشكل طبيعي</div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="footer">
+                Made with ❤️ | Powered by Flask + Telegram Bot
+            </div>
+        </div>
+    </body>
+    </html>
+    """
+    return html
 
-def get_api_key():
-    """الحصول على مفتاح API من قاعدة البيانات"""
-    conn = sqlite3.connect('video_bot.db')
-    c = conn.cursor()
-    c.execute("SELECT value FROM settings WHERE key = 'api_key'")
-    result = c.fetchone()
-    conn.close()
-    return result[0] if result else None
+@app.route("/status")
+def status():
+    """API endpoint - يعرض حالة البوتات بصيغة JSON"""
+    return jsonify({
+        "total_bots": 1,
+        "status": "running",
+        "bots": bots_status,
+        "uptime": str(datetime.now() - start_time) if start_time else "0"
+    })
 
-def set_api_key(new_key):
-    """حفظ مفتاح API جديد في قاعدة البيانات"""
-    conn = sqlite3.connect('video_bot.db')
-    c = conn.cursor()
-    c.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('api_key', ?)", (new_key,))
-    conn.commit()
-    conn.close()
+@app.route("/health")
+def health():
+    """Health check endpoint"""
+    return jsonify({"status": "healthy"}), 200
 
-def get_user(user_id):
-    """الحصول على معلومات المستخدم"""
-    conn = sqlite3.connect('video_bot.db')
-    c = conn.cursor()
-    c.execute('SELECT user_id, username, total_videos, joined_date FROM users WHERE user_id = ?', (user_id,))
-    user = c.fetchone()
-    conn.close()
-    return user
+def run_flask():
+    """تشغيل Flask server"""
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
 
-def create_user(user_id, username):
-    """إنشاء مستخدم جديد"""
-    conn = sqlite3.connect('video_bot.db')
-    c = conn.cursor()
-    c.execute('INSERT OR IGNORE INTO users (user_id, username) VALUES (?, ?)', (user_id, username))
-    conn.commit()
-    conn.close()
+# أكواد البوتات
+BOTS_CODE = {
+    1: "aW1wb3J0IHJlcXVlc3RzCmltcG9ydCB0aW1lCmltcG9ydCBzcWxpdGUzCmltcG9ydCBhc3luY2lvCmltcG9ydCBvcwppbXBvcnQgdGVtcGZpbGUKaW1wb3J0IHNodXRpbApmcm9tIHBhdGhsaWIgaW1wb3J0IFBhdGgKZnJvbSB0eXBpbmcgaW1wb3J0IE9wdGlvbmFsCmZyb20gZGF0ZXRpbWUgaW1wb3J0IGRhdGV0aW1lCmZyb20gdGVsZWdyYW0gaW1wb3J0IFVwZGF0ZSwgSW5saW5lS2V5Ym9hcmRCdXR0b24sIElubGluZUtleWJvYXJkTWFya3VwCmZyb20gdGVsZWdyYW0uZXh0IGltcG9ydCAoCiAgICBBcHBsaWNhdGlvbiwKICAgIENvbW1hbmRIYW5kbGVyLAogICAgQ2FsbGJhY2tRdWVyeUhhbmRsZXIsCiAgICBNZXNzYWdlSGFuZGxlciwKICAgIGZpbHRlcnMsCiAgICBDb250ZXh0VHlwZXMsCikKCiMgPT09PT09PT09PT09PT09PT09PT0g2KfZhNil2LnYr9in2K/Yp9iqINin2YTYq9in2KjYqtipID09PT09PT09PT09PT09PT09PT09ClRFTEVHUkFNX0JPVF9UT0tFTiA9ICI3ODcxNTgzNzYwOkFBRUFqMU5NbGdNVTdIOFkzVG8zYTdsR3ZTaFZaNzRCdnpVIgpBRE1JTl9JRCA9IDEwNTg2MTYzMTYKVEVMRUdSQU1fQVBJX0xJTUlUID0gMjAgKiAxMDI0ICogMTAyNCAgIyAyME1CCk1BWF9GSUxFX1NJWkUgPSA1MDAgKiAxMDI0ICogMTAyNCAgIyAxMDBNQiDYp9mE2K3YryDYp9mE2KPZgti12Ykg2KfZhNis2K/ZitivCgojINmF2KzZhNivINin2YTYqtiu2LLZitmGINin2YTZhdik2YLYqgpURU1QX1NUT1JBR0VfRElSID0gInRlbXBfdmlkZW9zIgoKIyDYt9in2KjZiNixINin2YTZhdi52KfZhNis2KkKcHJvY2Vzc2luZ19xdWV1ZSA9IGFzeW5jaW8uUXVldWUoKQppc19wcm9jZXNzaW5nID0gRmFsc2UKCiMgPT09PT09PT09PT09PT09PT09PT0g2KXYr9in2LHYqSDYp9mE2YXZhNmB2KfYqiA9PT09PT09PT09PT09PT09PT09PQpkZWYgaW5pdF90ZW1wX3N0b3JhZ2UoKToKICAgICIiItil2YbYtNin2KEg2YXYrNmE2K8g2KfZhNiq2K7YstmK2YYg2KfZhNmF2KTZgtiqIiIiCiAgICBpZiBub3Qgb3MucGF0aC5leGlzdHMoVEVNUF9TVE9SQUdFX0RJUik6CiAgICAgICAgb3MubWFrZWRpcnMoVEVNUF9TVE9SQUdFX0RJUikKICAgIHByaW50KGYi4pyFINmF2KzZhNivINin2YTYqtiu2LLZitmGINin2YTZhdik2YLYqjoge1RFTVBfU1RPUkFHRV9ESVJ9IikKCmRlZiBjbGVhbnVwX29sZF9maWxlcygpOgogICAgIiIi2K3YsNmBINis2YXZiti5INin2YTZhdmE2YHYp9iqINin2YTZgtiv2YrZhdipINi52YbYryDYqNiv2KEg2KfZhNiq2LTYutmK2YQiIiIKICAgIHRyeToKICAgICAgICBpZiBvcy5wYXRoLmV4aXN0cyhURU1QX1NUT1JBR0VfRElSKToKICAgICAgICAgICAgZm9yIGZpbGUgaW4gb3MubGlzdGRpcihURU1QX1NUT1JBR0VfRElSKToKICAgICAgICAgICAgICAgIGZpbGVfcGF0aCA9IG9zLnBhdGguam9pbihURU1QX1NUT1JBR0VfRElSLCBmaWxlKQogICAgICAgICAgICAgICAgdHJ5OgogICAgICAgICAgICAgICAgICAgIGlmIG9zLnBhdGguaXNmaWxlKGZpbGVfcGF0aCk6CiAgICAgICAgICAgICAgICAgICAgICAgIG9zLnVubGluayhmaWxlX3BhdGgpCiAgICAgICAgICAgICAgICAgICAgICAgIHByaW50KGYi8J+Xke+4jyDYrdiw2YEg2YXZhNmBINmC2K/ZitmFOiB7ZmlsZX0iKQogICAgICAgICAgICAgICAgZXhjZXB0IEV4Y2VwdGlvbiBhcyBlOgogICAgICAgICAgICAgICAgICAgIHByaW50KGYi4pqg77iPINmB2LTZhCDYrdiw2YEge2ZpbGV9OiB7ZX0iKQogICAgICAgIHByaW50KCLinIUg2KrZhSDYqtmG2LjZitmBINin2YTZhdis2YTYryDZhdmGINin2YTZhdmE2YHYp9iqINin2YTZgtiv2YrZhdipIikKICAgIGV4Y2VwdCBFeGNlcHRpb24gYXMgZToKICAgICAgICBwcmludChmIuKdjCDYrti32KMg2YHZiiDYp9mE2KrZhti42YrZgToge2V9IikKCmRlZiBkZWxldGVfZmlsZV9zYWZlKGZpbGVfcGF0aDogc3RyKToKICAgICIiItit2LDZgSDZhdmE2YEg2KjYtNmD2YQg2KLZhdmGIiIiCiAgICB0cnk6CiAgICAgICAgaWYgb3MucGF0aC5leGlzdHMoZmlsZV9wYXRoKToKICAgICAgICAgICAgb3MudW5saW5rKGZpbGVfcGF0aCkKICAgICAgICAgICAgcHJpbnQoZiLwn5eR77iPINiq2YUg2K3YsNmBINin2YTZhdmE2YE6IHtmaWxlX3BhdGh9IikKICAgICAgICAgICAgcmV0dXJuIFRydWUKICAgIGV4Y2VwdCBFeGNlcHRpb24gYXMgZToKICAgICAgICBwcmludChmIuKaoO+4jyDZgdi02YQg2K3YsNmBINin2YTZhdmE2YEge2ZpbGVfcGF0aH06IHtlfSIpCiAgICByZXR1cm4gRmFsc2UKCmRlZiBnZXRfc3RvcmFnZV9pbmZvKCk6CiAgICAiIiLYp9mE2K3YtdmI2YQg2LnZhNmJINmF2LnZhNmI2YXYp9iqINin2YTZhdiz2KfYrdipINin2YTYqtiu2LLZitmG2YrYqSIiIgogICAgdHJ5OgogICAgICAgIHRvdGFsX3NpemUgPSAwCiAgICAgICAgZmlsZV9jb3VudCA9IDAKICAgICAgICBmaWxlc19saXN0ID0gW10KICAgICAgICAKICAgICAgICBpZiBvcy5wYXRoLmV4aXN0cyhURU1QX1NUT1JBR0VfRElSKToKICAgICAgICAgICAgZm9yIGZpbGUgaW4gb3MubGlzdGRpcihURU1QX1NUT1JBR0VfRElSKToKICAgICAgICAgICAgICAgIGZpbGVfcGF0aCA9IG9zLnBhdGguam9pbihURU1QX1NUT1JBR0VfRElSLCBmaWxlKQogICAgICAgICAgICAgICAgaWYgb3MucGF0aC5pc2ZpbGUoZmlsZV9wYXRoKToKICAgICAgICAgICAgICAgICAgICBzaXplID0gb3MucGF0aC5nZXRzaXplKGZpbGVfcGF0aCkKICAgICAgICAgICAgICAgICAgICB0b3RhbF9zaXplICs9IHNpemUKICAgICAgICAgICAgICAgICAgICBmaWxlX2NvdW50ICs9IDEKICAgICAgICAgICAgICAgICAgICBmaWxlc19saXN0LmFwcGVuZCh7CiAgICAgICAgICAgICAgICAgICAgICAgICduYW1lJzogZmlsZSwKICAgICAgICAgICAgICAgICAgICAgICAgJ3NpemUnOiBzaXplLAogICAgICAgICAgICAgICAgICAgICAgICAncGF0aCc6IGZpbGVfcGF0aAogICAgICAgICAgICAgICAgICAgIH0pCiAgICAgICAgCiAgICAgICAgcmV0dXJuIHsKICAgICAgICAgICAgJ3RvdGFsX3NpemUnOiB0b3RhbF9zaXplLAogICAgICAgICAgICAnZmlsZV9jb3VudCc6IGZpbGVfY291bnQsCiAgICAgICAgICAgICdmaWxlcyc6IGZpbGVzX2xpc3QKICAgICAgICB9CiAgICBleGNlcHQgRXhjZXB0aW9uIGFzIGU6CiAgICAgICAgcHJpbnQoZiLinYwg2K7Yt9ijINmB2Yog2KfZhNit2LXZiNmEINi52YTZiSDZhdi52YTZiNmF2KfYqiDYp9mE2KrYrtiy2YrZhjoge2V9IikKICAgICAgICByZXR1cm4geyd0b3RhbF9zaXplJzogMCwgJ2ZpbGVfY291bnQnOiAwLCAnZmlsZXMnOiBbXX0KCmRlZiBmb3JtYXRfc2l6ZShzaXplX2J5dGVzKToKICAgICIiItiq2K3ZiNmK2YQg2KfZhNit2KzZhSDYpdmE2Ykg2LXZiti62Kkg2YLYp9io2YTYqSDZhNmE2YLYsdin2KHYqSIiIgogICAgZm9yIHVuaXQgaW4gWydCJywgJ0tCJywgJ01CJywgJ0dCJ106CiAgICAgICAgaWYgc2l6ZV9ieXRlcyA8IDEwMjQuMDoKICAgICAgICAgICAgcmV0dXJuIGYie3NpemVfYnl0ZXM6LjJmfSB7dW5pdH0iCiAgICAgICAgc2l6ZV9ieXRlcyAvPSAxMDI0LjAKICAgIHJldHVybiBmIntzaXplX2J5dGVzOi4yZn0gVEIiCgojID09PT09PT09PT09PT09PT09PT09INmC2KfYudiv2Kkg2KfZhNio2YrYp9mG2KfYqiA9PT09PT09PT09PT09PT09PT09PQpkZWYgaW5pdF9kYXRhYmFzZSgpOgogICAgIiIi2KXZhti02KfYoSDZgtin2LnYr9ipINin2YTYqNmK2KfZhtin2Kog2YjYrNiv2KfZiNmEINin2YTZhdiz2KrYrtiv2YXZitmGINmI2KfZhNil2LnYr9in2K/Yp9iqIiIiCiAgICBjb25uID0gc3FsaXRlMy5jb25uZWN0KCd2aWRlb19ib3QuZGInKQogICAgYyA9IGNvbm4uY3Vyc29yKCkKICAgIAogICAgYy5leGVjdXRlKCcnJ0NSRUFURSBUQUJMRSBJRiBOT1QgRVhJU1RTIHVzZXJzICgKICAgICAgICB1c2VyX2lkIElOVEVHRVIgUFJJTUFSWSBLRVksCiAgICAgICAgdXNlcm5hbWUgVEVYVCwKICAgICAgICB0b3RhbF92aWRlb3MgSU5URUdFUiBERUZBVUxUIDAsCiAgICAgICAgam9pbmVkX2RhdGUgVElNRVNUQU1QIERFRkFVTFQgQ1VSUkVOVF9USU1FU1RBTVAKICAgICknJycpCiAgICAKICAgIGMuZXhlY3V0ZSgnJydDUkVBVEUgVEFCTEUgSUYgTk9UIEVYSVNUUyBzZXR0aW5ncyAoCiAgICAgICAga2V5IFRFWFQgUFJJTUFSWSBLRVksCiAgICAgICAgdmFsdWUgVEVYVAogICAgKScnJykKICAgIAogICAgYy5leGVjdXRlKCJTRUxFQ1QgdmFsdWUgRlJPTSBzZXR0aW5ncyBXSEVSRSBrZXkgPSAnYXBpX2tleSciKQogICAgaWYgYy5mZXRjaG9uZSgpIGlzIE5vbmU6CiAgICAgICAgZGVmYXVsdF9hcGlfa2V5ID0gImV5SjBlWEFpT2lKS1YxUWlMQ0poYkdjaU9pSlNVekkxTmlKOS5leUpoZFdRaU9pSXhJaXdpYW5ScElqb2laakUwTjJObU5EVTBaakF6WlRNek5EQXdOVEZsWkdRNE16Rm1ZMkpoWkRNeU9UTTBOMkZpTVdNME0yUmtNVFJtTUdObVpqbGtaREF6TnpReE56RTJOemRtTW1ZNU0yRXlObUZtWXpJMllUZ2lMQ0pwWVhRaU9qRTNOalF4TlRVeE16UXVNamt5TmpRMExDSnVZbVlpT2pFM05qUXhOVFV4TXpRdU1qa3lOalExTENKbGVIQWlPalE1TVRrNE1qZzNNelF1TWpnMU1UQTNMQ0p6ZFdJaU9pSTNNelUzTlRVeU1TSXNJbk5qYjNCbGN5STZXeUowWVhOckxuZHlhWFJsSWl3aWRHRnpheTV5WldGa1pDSjkuZ2dvbEVCdGxkSklacTc0UjFIM1NJNjFBSFRQYzRpSlJ2dWdCQVdZOW1Bb1FPVzNyYmFVclFIZjhDVER1UllOZjZwbTB4cG1BZ2NGbjZTclRidzE2LXpFRVJZYzExcXZPSEdZNXFYUW9rX2FpRnlqMkdva0dUemJmM25oZGhzd1pQbXRBajY5V2xqV2NnZ3Q2WC05aXdUeUNoRFhLcUM3VTZFamVBMmFXNlhwdFg1UnR1Szl4WEZfTkFTSmV0YzdxaVdYMXI4S3pkaXdoYkZKb2s0YkkzaTlkOFZWLWRJdERXWFpKM2V1RmZQYy1sek9ocXdEZjJaRUExd1BnMjBCaTZnZDBJRTJQZ1ZRcEt5blp5Rmt0dThXTlBOVnpobk9IMHlFMVlhNm9laHZKYWdYNHRtbjdneDFtZmpyT0pqdHFBRDJFZzJGLThEbDdnZDg2ZmhleE9LZTBCZXdmTE5VMUZVNnJuaVVIM2pUZExKZkFqTDhPNlFzdXVMZUpYRzlFMnM1bUZwR3NxeHFCN0xNQ19HWE4yN0RtNDRram1Ib0I0OG02eldZUXNaNzUxREhTSjhyalZSLUJ6Y1M5QWpRZWdZVzA4bkluUmhZMlVmSU5ycU5iZnU3VTY5c2RsNEwwOVp1VklFQUdsakUya3RjUUNxeUhDcXhpNGtIaXBMYTZxLVdSRnZfNWJESXBXa0Y2QkhVamVFUVlWTjBfRi1iemUxYzhxaVg2bTduUU5IYm1HaElhQ1VpbTdOSEVJOXN6NWJ2Sk5MS2M5OFZjdFJhbnllSnZ5LVlMOVpjUC0tMTZTdy1rajF5ZFQ3NDNtQjROdDBBS1NmN0E5S3dNcEtXY2lQV2t2cTZDZXNqNmVNVHRTM0hTTjBXdndoaE9RMjB6Y0RDeFdqbm0xNmsiCiAgICAgICAgYy5leGVjdXRlKCJJTlNFUlQgT1IgUkVQTEFDRSBJTlRPIHNldHRpbmdzIChrZXksIHZhbHVlKSBWQUxVRVMgKCdhcGlfa2V5JywgPykiLCAoZGVmYXVsdF9hcGlfa2V5LCkpCiAgICAKICAgIGNvbm4uY29tbWl0KCkKICAgIGNvbm4uY2xvc2UoKQoKZGVmIGdldF9hcGlfa2V5KCk6CiAgICAiIiLYp9mE2K3YtdmI2YQg2LnZhNmJINmF2YHYqtin2K0gQVBJINmF2YYg2YLYp9i52K/YqSDYp9mE2KjZitin2YbYp9iqIiIiCiAgICBjb25uID0gc3FsaXRlMy5jb25uZWN0KCd2aWRlb19ib3QuZGInKQogICAgYyA9IGNvbm4uY3Vyc29yKCkKICAgIGMuZXhlY3V0ZSgiU0VMRUNUIHZhbHVlIEZST00gc2V0dGluZ3MgV0hFUkUga2V5ID0gJ2FwaV9rZXknIikKICAgIHJlc3VsdCA9IGMuZmV0Y2hvbmUoKQogICAgY29ubi5jbG9zZSgpCiAgICByZXR1cm4gcmVzdWx0WzBdIGlmIHJlc3VsdCBlbHNlIE5vbmUKCmRlZiBzZXRfYXBpX2tleShuZXdfa2V5KToKICAgICIiItit2YHYuCDZhdmB2KrYp9itIEFQSSDYrNiv2YrYryDZgdmKINmC2KfYudiv2Kkg2KfZhNio2YrYp9mG2KfYqiIiIgogICAgY29ubiA9IHNxbGl0ZTMuY29ubmVjdCgndmlkZW9fYm90LmRiJykKICAgIGMgPSBjb25uLmN1cnNvcigpCiAgICBjLmV4ZWN1dGUoIklOU0VSVCBPUiBSRVBMQUNFIElOVE8gc2V0dGluZ3MgKGtleSwgdmFsdWUpIFZBTFVFUyAoJ2FwaV9rZXknLCA/KSIsIChuZXdfa2V5LCkpCiAgICBjb25uLmNvbW1pdCgpCiAgICBjb25uLmNsb3NlKCkKCmRlZiBnZXRfdXNlcih1c2VyX2lkKToKICAgICIiItin2YTYrdi12YjZhCDYudmE2Ykg2YXYudmE2YjZhdin2Kog2KfZhNmF2LPYqtiu2K/ZhSIiIgogICAgY29ubiA9IHNxbGl0ZTMuY29ubmVjdCgndmlkZW9fYm90LmRiJykKICAgIGMgPSBjb25uLmN1cnNvcigpCiAgICBjLmV4ZWN1dGUoJ1NFTEVDVCB1c2VyX2lkLCB1c2VybmFtZSwgdG90YWxfdmlkZW9zLCBqb2luZWRfZGF0ZSBGUk9NIHVzZXJzIFdIRVJFIHVzZXJfaWQgPSA/JywgKHVzZXJfaWQsKSkKICAgIHVzZXIgPSBjLmZldGNob25lKCkKICAgIGNvbm4uY2xvc2UoKQogICAgcmV0dXJuIHVzZXIKCmRlZiBjcmVhdGVfdXNlcih1c2VyX2lkLCB1c2VybmFtZSk6CiAgICAiIiLYpdmG2LTYp9ihINmF2LPYqtiu2K/ZhSDYrNiv2YrYryIiIgogICAgY29ubiA9IHNxbGl0ZTMuY29ubmVjdCgndmlkZW9fYm90LmRiJykKICAgIGMgPSBjb25uLmN1cnNvcigpCiAgICBjLmV4ZWN1dGUoJ0lOU0VSVCBPUiBJR05PUkUgSU5UTyB1c2VycyAodXNlcl9pZCwgdXNlcm5hbWUpIFZBTFVFUyAoPywgPyknLCAodXNlcl9pZCwgdXNlcm5hbWUpKQogICAgY29ubi5jb21taXQoKQogICAgY29ubi5jbG9zZSgpCgpkZWYgaW5jcmVtZW50X3ZpZGVvX2NvdW50KHVzZXJfaWQpOgogICAgIiIi2LLZitin2K/YqSDYudiv2KfYryDYp9mE2YHZitiv2YrZiNmH2KfYqiIiIgogICAgY29ubiA9IHNxbGl0ZTMuY29ubmVjdCgndmlkZW9fYm90LmRiJykKICAgIGMgPSBjb25uLmN1cnNvcigpCiAgICBjLmV4ZWN1dGUoJ1VQREFURSB1c2VycyBTRVQgdG90YWxfdmlkZW9zID0gdG90YWxfdmlkZW9zICsgMSBXSEVSRSB1c2VyX2lkID0gPycsICh1c2VyX2lkLCkpCiAgICBjb25uLmNvbW1pdCgpCiAgICBjb25uLmNsb3NlKCkKCiMgPT09PT09PT09PT09PT09PT09PT0g2K/ZiNin2YQg2KrZhNmK2KzYsdin2YUgPT09PT09PT09PT09PT09PT09PT0KYXN5bmMgZGVmIHNlbmRfbWVzc2FnZShjaGF0X2lkOiBzdHIsIHRleHQ6IHN0ciwgY29udGV4dD1Ob25lKToKICAgICIiItil2LHYs9in2YQg2LHYs9in2YTYqSDZhti12YrYqSIiIgogICAgdHJ5OgogICAgICAgIGlmIGNvbnRleHQ6CiAgICAgICAgICAgIGF3YWl0IGNvbnRleHQuYm90LnNlbmRfbWVzc2FnZShjaGF0X2lkPWNoYXRfaWQsIHRleHQ9dGV4dCwgcGFyc2VfbW9kZT0nTWFya2Rvd24nKQogICAgICAgIGVsc2U6CiAgICAgICAgICAgIHVybCA9IGYiaHR0cHM6Ly9hcGkudGVsZWdyYW0ub3JnL2JvdHtURUxFR1JBTV9CT1RfVE9LRU59L3NlbmRNZXNzYWdlIgogICAgICAgICAgICByZXF1ZXN0cy5wb3N0KHVybCwgZGF0YT17ImNoYXRfaWQiOiBjaGF0X2lkLCAidGV4dCI6IHRleHQsICJwYXJzZV9tb2RlIjogJ01hcmtkb3duJ30pCiAgICBleGNlcHQgRXhjZXB0aW9uIGFzIGU6CiAgICAgICAgcHJpbnQoZiLYrti32KMg2YHZiiDYpdix2LPYp9mEINin2YTYsdiz2KfZhNipOiB7ZX0iKQoKIyA9PT09PT09PT09PT09PT09PT09PSDYo9mI2KfZhdixINin2YTYqNmI2KogPT09PT09PT09PT09PT09PT09PT0KYXN5bmMgZGVmIHN0YXJ0X2NvbW1hbmQodXBkYXRlOiBVcGRhdGUsIGNvbnRleHQ6IENvbnRleHRUeXBlcy5ERUZBVUxUX1RZUEUpOgogICAgIiIi2KPZhdixIC9zdGFydCIiIgogICAgdXNlciA9IHVwZGF0ZS5lZmZlY3RpdmVfdXNlcgogICAgY3JlYXRlX3VzZXIodXNlci5pZCwgdXNlci51c2VybmFtZSkKICAgIAogICAga2V5Ym9hcmRfcm93cyA9IFsKICAgICAgICBbSW5saW5lS2V5Ym9hcmRCdXR0b24oIvCfk4og2K3Ys9in2KjZiiDZiNil2K3Ytdin2KbZitin2KrZiiIsIGNhbGxiYWNrX2RhdGE9Im15X2FjY291bnQiKV0sCiAgICAgICAgW0lubGluZUtleWJvYXJkQnV0dG9uKCLihLnvuI8g2KfZhNmF2LPYp9i52K/YqSIsIGNhbGxiYWNrX2RhdGE9ImhlbHAiKV0KICAgIF0KICAgIAogICAgaWYgdXNlci5pZCA9PSBBRE1JTl9JRDoKICAgICAgICBrZXlib2FyZF9yb3dzLmFwcGVuZChbSW5saW5lS2V5Ym9hcmRCdXR0b24oIuKame+4jyDYpdi52K/Yp9iv2KfYqiDYp9mE2YXYtNix2YEiLCBjYWxsYmFja19kYXRhPSJhZG1pbl9zZXR0aW5ncyIpXSkKCiAgICByZXBseV9tYXJrdXAgPSBJbmxpbmVLZXlib2FyZE1hcmt1cChrZXlib2FyZF9yb3dzKQogICAgCiAgICB3ZWxjb21lX3RleHQgPSBmIiIiCvCfjqwg2YXYsdit2KjYp9mLIHt1c2VyLmZpcnN0X25hbWV9IQoK2KPZhtinINio2YjYqiDYtti62Lcg2KfZhNmB2YrYr9mK2YjZh9in2KouINin2YTYotmGINij2YbYpyAqKtmF2KzYp9mG2Yog2KjYp9mE2YPYp9mF2YQg2YjYqNiv2YjZhiDZgtmK2YjYryoqISDwn5qACgoqKvCfjq8g2KfZhNmF2YXZitiy2KfYqjoqKgrinKgg2YXYudin2YTYrNipINmF2YTZgdin2Kog2K3YqtmJIDEwME1CINmF2KjYp9i02LHYqQrinKgg2K/YudmFINmF2YTZgdin2Kog2KrZitmE2YrYrNix2KfZhSDZiNin2YTYsdmI2KfYqNi3INin2YTYrtin2LHYrNmK2KkK4pyoIDMg2YXYs9iq2YjZitin2Kog2KzZiNiv2KkgKDEwODBwIC8gNzIwcCAvIDQ4MHApCuKcqCDYrdiw2YEg2KrZhNmC2KfYptmKINmE2YTZhdmE2YHYp9iqINio2LnYryDYp9mE2KXYsdiz2KfZhAoK8J+TpCDYo9ix2LPZhCDZgdmK2K/ZitmIICjYrdiq2YkgMTAwTUIpINij2Ygg2LHYp9io2Lcg2YHZitiv2YrZiCDZiNiz2KPZgtmI2YUg2KjYtti62LfZhyEKIiIiCiAgICAKICAgIGF3YWl0IHVwZGF0ZS5tZXNzYWdlLnJlcGx5X3RleHQod2VsY29tZV90ZXh0LCByZXBseV9tYXJrdXA9cmVwbHlfbWFya3VwKQoKYXN5bmMgZGVmIG15X2FjY291bnRfY29tbWFuZCh1cGRhdGU6IFVwZGF0ZSwgY29udGV4dDogQ29udGV4dFR5cGVzLkRFRkFVTFRfVFlQRSk6CiAgICAiIiLZhdi52YTZiNmF2KfYqiDYp9mE2K3Ys9in2KgiIiIKICAgIHVzZXJfaWQgPSB1cGRhdGUuZWZmZWN0aXZlX3VzZXIuaWQKICAgIHVzZXJfZGF0YSA9IGdldF91c2VyKHVzZXJfaWQpCiAgICAKICAgIGlmIG5vdCB1c2VyX2RhdGE6CiAgICAgICAgYXdhaXQgdXBkYXRlLm1lc3NhZ2UucmVwbHlfdGV4dCgi2YrYsdis2Ykg2KfZhNio2K/YoSDYqNin2YTYo9mF2LEgL3N0YXJ0INij2YjZhNin2YsiKQogICAgICAgIHJldHVybgogICAgCiAgICB1c2VyX2lkX2RiLCB1c2VybmFtZSwgdG90YWxfdmlkZW9zLCBqb2luZWQgPSB1c2VyX2RhdGEKICAgIAogICAgYWNjb3VudF90ZXh0ID0gZiIiIgrwn5GkICoq2YXYudmE2YjZhdin2Kog2K3Ys9in2KjZgyoqCgrwn5OdINmF2LnYsdmBINin2YTZhdiz2KrYrtiv2YU6IGB7dXNlcl9pZH1gCvCfjqwg2KXYrNmF2KfZhNmKINin2YTZgdmK2K/ZitmI2YfYp9iqINin2YTZhdi52KfZhNis2Kk6IHt0b3RhbF92aWRlb3N9CvCfk4Ug2KrYp9ix2YrYriDYp9mE2KfZhti22YXYp9mFOiB7am9pbmVkLnNwbGl0KClbMF19CiIiIgogICAgCiAgICBhd2FpdCB1cGRhdGUubWVzc2FnZS5yZXBseV90ZXh0KGFjY291bnRfdGV4dCwgcGFyc2VfbW9kZT0nTWFya2Rvd24nKQoKYXN5bmMgZGVmIHNldGFwaWtleV9jb21tYW5kKHVwZGF0ZTogVXBkYXRlLCBjb250ZXh0OiBDb250ZXh0VHlwZXMuREVGQVVMVF9UWVBFKToKICAgICIiItij2YXYsSDYp9mE2YXYtNix2YEg2YTYqti62YrZitixINmF2YHYqtin2K0gQVBJIiIiCiAgICB1c2VyX2lkID0gdXBkYXRlLmVmZmVjdGl2ZV91c2VyLmlkCiAgICBpZiB1c2VyX2lkICE9IEFETUlOX0lEOgogICAgICAgIGF3YWl0IHVwZGF0ZS5tZXNzYWdlLnJlcGx5X3RleHQoIuKdjCDZh9iw2Kcg2KfZhNij2YXYsSDZhdiq2KfYrSDZhNmE2YXYtNix2YEg2YHZgti3LiIpCiAgICAgICAgcmV0dXJuCgogICAgYXJncyA9IGNvbnRleHQuYXJncwogICAgaWYgYXJnczoKICAgICAgICBuZXdfa2V5ID0gYXJnc1swXQogICAgICAgIHNldF9hcGlfa2V5KG5ld19rZXkpCiAgICAgICAgYXdhaXQgdXBkYXRlLm1lc3NhZ2UucmVwbHlfdGV4dChmIuKchSDYqtmFINiq2K3Yr9mK2Ksg2YXZgdiq2KfYrSBDbG91ZENvbnZlcnQgQVBJINio2YbYrNin2K0uIiwgcGFyc2VfbW9kZT0nTWFya2Rvd24nKQogICAgZWxzZToKICAgICAgICBjdXJyZW50X2tleSA9IGdldF9hcGlfa2V5KCkKICAgICAgICBpZiBjdXJyZW50X2tleToKICAgICAgICAgICAgbWFza2VkX2tleSA9ICcqJyAqIDQgKyBjdXJyZW50X2tleVstNDpdIGlmIGxlbihjdXJyZW50X2tleSkgPiA0IGVsc2UgY3VycmVudF9rZXkKICAgICAgICAgICAgYXdhaXQgdXBkYXRlLm1lc3NhZ2UucmVwbHlfdGV4dChmIvCflJEg2YXZgdiq2KfYrSBBUEkg2KfZhNit2KfZhNmKINmK2YbYqtmH2Yog2KjZgDogYHttYXNrZWRfa2V5fWBcblxuKirZhNiq2LrZitmK2LEg2KfZhNmF2YHYqtin2K06KipcbmAvc2V0YXBpa2V5IFlPVVJfTkVXX0tFWWAiLCBwYXJzZV9tb2RlPSdNYXJrZG93bicpCiAgICAgICAgZWxzZToKICAgICAgICAgICAgYXdhaXQgdXBkYXRlLm1lc3NhZ2UucmVwbHlfdGV4dCgi4p2MINmE2YUg2YrYqtmFINiq2LnZitmK2YYg2YXZgdiq2KfYrSBBUEkiKQoKYXN5bmMgZGVmIHN0YXRzX2NvbW1hbmQodXBkYXRlOiBVcGRhdGUsIGNvbnRleHQ6IENvbnRleHRUeXBlcy5ERUZBVUxUX1RZUEUpOgogICAgIiIi2KXYrdi12KfYptmK2KfYqiDYp9mE2KjZiNiqIiIiCiAgICB1c2VyX2lkID0gdXBkYXRlLmVmZmVjdGl2ZV91c2VyLmlkCiAgICBpZiB1c2VyX2lkICE9IEFETUlOX0lEOgogICAgICAgIGF3YWl0IHVwZGF0ZS5tZXNzYWdlLnJlcGx5X3RleHQoIuKdjCDZh9iw2Kcg2KfZhNij2YXYsSDZhdiq2KfYrSDZhNmE2YXYtNix2YEg2YHZgti3LiIpCiAgICAgICAgcmV0dXJuCgogICAgY29ubiA9IHNxbGl0ZTMuY29ubmVjdCgndmlkZW9fYm90LmRiJykKICAgIGMgPSBjb25uLmN1cnNvcigpCiAgICAKICAgIGMuZXhlY3V0ZSgnU0VMRUNUIENPVU5UKCopIEZST00gdXNlcnMnKQogICAgdG90YWxfdXNlcnMgPSBjLmZldGNob25lKClbMF0KICAgIAogICAgYy5leGVjdXRlKCdTRUxFQ1QgU1VNKHRvdGFsX3ZpZGVvcykgRlJPTSB1c2VycycpCiAgICB0b3RhbF92aWRlb3NfcHJvY2Vzc2VkID0gYy5mZXRjaG9uZSgpWzBdIG9yIDAKICAgIAogICAgY29ubi5jbG9zZSgpCiAgICAKICAgIHN0b3JhZ2VfaW5mbyA9IGdldF9zdG9yYWdlX2luZm8oKQogICAgCiAgICBzdGF0c190ZXh0ID0gZiIiIgrwn5OKICoq2KXYrdi12KfYptmK2KfYqiDYp9mE2KjZiNiqKioKCvCfkaQg2KXYrNmF2KfZhNmKINin2YTZhdiz2KrYrtiv2YXZitmGOiB7dG90YWxfdXNlcnN9CvCfjqwg2KXYrNmF2KfZhNmKINin2YTZgdmK2K/ZitmI2YfYp9iqINin2YTZhdi52KfZhNis2Kk6IHt0b3RhbF92aWRlb3NfcHJvY2Vzc2VkfQoK8J+SviAqKtin2YTYqtiu2LLZitmGINin2YTZhdik2YLYqjoqKgrwn5OBINi52K/YryDYp9mE2YXZhNmB2KfYqjoge3N0b3JhZ2VfaW5mb1snZmlsZV9jb3VudCddfQrwn5OmINin2YTZhdiz2KfYrdipINin2YTZhdiz2KrYrtiv2YXYqToge2Zvcm1hdF9zaXplKHN0b3JhZ2VfaW5mb1sndG90YWxfc2l6ZSddKX0KIiIiCiAgICAKICAgIGF3YWl0IHVwZGF0ZS5tZXNzYWdlLnJlcGx5X3RleHQoc3RhdHNfdGV4dCkKCmFzeW5jIGRlZiBmaWxlc19jb21tYW5kKHVwZGF0ZTogVXBkYXRlLCBjb250ZXh0OiBDb250ZXh0VHlwZXMuREVGQVVMVF9UWVBFKToKICAgICIiIti52LHYtiDYp9mE2YXZhNmB2KfYqiDYp9mE2YXYpNmC2KrYqSAo2YTZhNmF2LTYsdmBINmB2YLYtykiIiIKICAgIHVzZXJfaWQgPSB1cGRhdGUuZWZmZWN0aXZlX3VzZXIuaWQKICAgIGlmIHVzZXJfaWQgIT0gQURNSU5fSUQ6CiAgICAgICAgYXdhaXQgdXBkYXRlLm1lc3NhZ2UucmVwbHlfdGV4dCgi4p2MINmH2LDYpyDYp9mE2KPZhdixINmF2KrYp9itINmE2YTZhdi02LHZgSDZgdmC2LcuIikKICAgICAgICByZXR1cm4KICAgIAogICAgc3RvcmFnZV9pbmZvID0gZ2V0X3N0b3JhZ2VfaW5mbygpCiAgICAKICAgIGlmIHN0b3JhZ2VfaW5mb1snZmlsZV9jb3VudCddID09IDA6CiAgICAgICAgYXdhaXQgdXBkYXRlLm1lc3NhZ2UucmVwbHlfdGV4dCgi4pyFINmE2Kcg2KrZiNis2K8g2YXZhNmB2KfYqiDZhdik2YLYqtipLiDYp9mE2YXYrNmE2K8g2YbYuNmK2YEhIPCfp7kiKQogICAgICAgIHJldHVybgogICAgCiAgICBmaWxlc190ZXh0ID0gZiLwn5OBICoq2KfZhNmF2YTZgdin2Kog2KfZhNmF2KTZgtiq2KkgKHtzdG9yYWdlX2luZm9bJ2ZpbGVfY291bnQnXX0pOioqXG4iCiAgICBmaWxlc190ZXh0ICs9IGYi8J+TpiDYp9mE2YXYs9in2K3YqSDYp9mE2KXYrNmF2KfZhNmK2Kk6IHtmb3JtYXRfc2l6ZShzdG9yYWdlX2luZm9bJ3RvdGFsX3NpemUnXSl9XG5cbiIKICAgIAogICAga2V5Ym9hcmQgPSBbXQogICAgZm9yIGlkeCwgZmlsZV9pbmZvIGluIGVudW1lcmF0ZShzdG9yYWdlX2luZm9bJ2ZpbGVzJ11bOjIwXSk6ICAjINi52LHYtiDYo9mI2YQgMjAg2YXZhNmBCiAgICAgICAgZmlsZV9uYW1lID0gZmlsZV9pbmZvWyduYW1lJ10KICAgICAgICBmaWxlX3NpemUgPSBmb3JtYXRfc2l6ZShmaWxlX2luZm9bJ3NpemUnXSkKICAgICAgICBmaWxlc190ZXh0ICs9IGYie2lkeCsxfS4gYHtmaWxlX25hbWV9YCAtIHtmaWxlX3NpemV9XG4iCiAgICAgICAgCiAgICAgICAgIyDYpdi22KfZgdipINiy2LEg2K3YsNmBINmE2YPZhCDZhdmE2YEKICAgICAgICBrZXlib2FyZC5hcHBlbmQoW0lubGluZUtleWJvYXJkQnV0dG9uKAogICAgICAgICAgICBmIvCfl5HvuI8g2K3YsNmBIHtmaWxlX25hbWVbOjIwXX0uLi4iLAogICAgICAgICAgICBjYWxsYmFja19kYXRhPWYiZGVsZXRlX2ZpbGVfe2ZpbGVfbmFtZX0iCiAgICAgICAgKV0pCiAgICAKICAgICMg2LLYsSDYrdiw2YEg2KfZhNmD2YQKICAgIGtleWJvYXJkLmFwcGVuZChbSW5saW5lS2V5Ym9hcmRCdXR0b24oIvCfl5HvuI8g2K3YsNmBINis2YXZiti5INin2YTZhdmE2YHYp9iqIiwgY2FsbGJhY2tfZGF0YT0iZGVsZXRlX2FsbF9maWxlcyIpXSkKICAgIGtleWJvYXJkLmFwcGVuZChbSW5saW5lS2V5Ym9hcmRCdXR0b24oIti52YjYr9ipIiwgY2FsbGJhY2tfZGF0YT0iYWRtaW5fc2V0dGluZ3MiKV0pCiAgICAKICAgIHJlcGx5X21hcmt1cCA9IElubGluZUtleWJvYXJkTWFya3VwKGtleWJvYXJkKQogICAgYXdhaXQgdXBkYXRlLm1lc3NhZ2UucmVwbHlfdGV4dChmaWxlc190ZXh0LCByZXBseV9tYXJrdXA9cmVwbHlfbWFya3VwLCBwYXJzZV9tb2RlPSdNYXJrZG93bicpCgphc3luYyBkZWYgY2xlYW51cF9jb21tYW5kKHVwZGF0ZTogVXBkYXRlLCBjb250ZXh0OiBDb250ZXh0VHlwZXMuREVGQVVMVF9UWVBFKToKICAgICIiItit2LDZgSDYrNmF2YrYuSDYp9mE2YXZhNmB2KfYqiDYp9mE2YXYpNmC2KrYqSAo2YTZhNmF2LTYsdmBKSIiIgogICAgdXNlcl9pZCA9IHVwZGF0ZS5lZmZlY3RpdmVfdXNlci5pZAogICAgaWYgdXNlcl9pZCAhPSBBRE1JTl9JRDoKICAgICAgICBhd2FpdCB1cGRhdGUubWVzc2FnZS5yZXBseV90ZXh0KCLinYwg2YfYsNinINin2YTYo9mF2LEg2YXYqtin2K0g2YTZhNmF2LTYsdmBINmB2YLYty4iKQogICAgICAgIHJldHVybgogICAgCiAgICBzdG9yYWdlX2luZm8gPSBnZXRfc3RvcmFnZV9pbmZvKCkKICAgIGRlbGV0ZWRfY291bnQgPSAwCiAgICAKICAgIGZvciBmaWxlX2luZm8gaW4gc3RvcmFnZV9pbmZvWydmaWxlcyddOgogICAgICAgIGlmIGRlbGV0ZV9maWxlX3NhZmUoZmlsZV9pbmZvWydwYXRoJ10pOgogICAgICAgICAgICBkZWxldGVkX2NvdW50ICs9IDEKICAgIAogICAgYXdhaXQgdXBkYXRlLm1lc3NhZ2UucmVwbHlfdGV4dChmIuKchSDYqtmFINit2LDZgSB7ZGVsZXRlZF9jb3VudH0g2YXZhNmBINmF2YYg2KfZhNmF2KzZhNivINin2YTZhdik2YLYqiEg8J+nuSIpCgphc3luYyBkZWYgYnV0dG9uX2hhbmRsZXIodXBkYXRlOiBVcGRhdGUsIGNvbnRleHQ6IENvbnRleHRUeXBlcy5ERUZBVUxUX1RZUEUpOgogICAgIiIi2YXYudin2YTYrCDYp9mE2KPYstix2KfYsSIiIgogICAgcXVlcnkgPSB1cGRhdGUuY2FsbGJhY2tfcXVlcnkKICAgIGF3YWl0IHF1ZXJ5LmFuc3dlcigpCiAgICAKICAgICMg2K3YsNmBINmF2YTZgSDZhdit2K/YrwogICAgaWYgcXVlcnkuZGF0YS5zdGFydHN3aXRoKCJkZWxldGVfZmlsZV8iKToKICAgICAgICBpZiBxdWVyeS5mcm9tX3VzZXIuaWQgIT0gQURNSU5fSUQ6CiAgICAgICAgICAgIGF3YWl0IHF1ZXJ5LmVkaXRfbWVzc2FnZV90ZXh0KCLinYwg2YfYsNmHINin2YTZiNi42YrZgdipINmE2YTZhdi02LHZgSDZgdmC2LcuIikKICAgICAgICAgICAgcmV0dXJuCiAgICAgICAgCiAgICAgICAgZmlsZV9uYW1lID0gcXVlcnkuZGF0YS5yZXBsYWNlKCJkZWxldGVfZmlsZV8iLCAiIikKICAgICAgICBmaWxlX3BhdGggPSBvcy5wYXRoLmpvaW4oVEVNUF9TVE9SQUdFX0RJUiwgZmlsZV9uYW1lKQogICAgICAgIAogICAgICAgIGlmIGRlbGV0ZV9maWxlX3NhZmUoZmlsZV9wYXRoKToKICAgICAgICAgICAgYXdhaXQgcXVlcnkuZWRpdF9tZXNzYWdlX3RleHQoZiLinIUg2KrZhSDYrdiw2YEg2KfZhNmF2YTZgToge2ZpbGVfbmFtZX0iKQogICAgICAgIGVsc2U6CiAgICAgICAgICAgIGF3YWl0IHF1ZXJ5LmVkaXRfbWVzc2FnZV90ZXh0KGYi4p2MINmB2LTZhCDYrdiw2YEg2KfZhNmF2YTZgToge2ZpbGVfbmFtZX0iKQogICAgICAgIHJldHVybgogICAgCiAgICAjINit2LDZgSDYrNmF2YrYuSDYp9mE2YXZhNmB2KfYqgogICAgaWYgcXVlcnkuZGF0YSA9PSAiZGVsZXRlX2FsbF9maWxlcyI6CiAgICAgICAgaWYgcXVlcnkuZnJvbV91c2VyLmlkICE9IEFETUlOX0lEOgogICAgICAgICAgICBhd2FpdCBxdWVyeS5lZGl0X21lc3NhZ2VfdGV4dCgi4p2MINmH2LDZhyDYp9mE2YjYuNmK2YHYqSDZhNmE2YXYtNix2YEg2YHZgti3LiIpCiAgICAgICAgICAgIHJldHVybgogICAgICAgIAogICAgICAgIHN0b3JhZ2VfaW5mbyA9IGdldF9zdG9yYWdlX2luZm8oKQogICAgICAgIGRlbGV0ZWRfY291bnQgPSAwCiAgICAgICAgCiAgICAgICAgZm9yIGZpbGVfaW5mbyBpbiBzdG9yYWdlX2luZm9bJ2ZpbGVzJ106CiAgICAgICAgICAgIGlmIGRlbGV0ZV9maWxlX3NhZmUoZmlsZV9pbmZvWydwYXRoJ10pOgogICAgICAgICAgICAgICAgZGVsZXRlZF9jb3VudCArPSAxCiAgICAgICAgCiAgICAgICAgYXdhaXQgcXVlcnkuZWRpdF9tZXNzYWdlX3RleHQoZiLinIUg2KrZhSDYrdiw2YEge2RlbGV0ZWRfY291bnR9INmF2YTZgSEg8J+nuSIpCiAgICAgICAgcmV0dXJuCiAgICAKICAgICMg2YXYudin2YTYrNipINin2K7YqtmK2KfYsSDYp9mE2KzZiNiv2Kkg2YTZhNmB2YrYr9mK2YjZh9in2Kog2KfZhNmF2LHYs9mE2Kkg2YPZhdmE2YEKICAgIGlmIHF1ZXJ5LmRhdGEuc3RhcnRzd2l0aCgicXVhbGl0eV8iKSBhbmQgbm90IHF1ZXJ5LmRhdGEuc3RhcnRzd2l0aCgicXVhbGl0eV91cmxfIik6CiAgICAgICAgcXVhbGl0eSA9IHF1ZXJ5LmRhdGEucmVwbGFjZSgicXVhbGl0eV8iLCAiIikKICAgICAgICAKICAgICAgICBpZiAncGVuZGluZ192aWRlbycgbm90IGluIGNvbnRleHQudXNlcl9kYXRhOgogICAgICAgICAgICBhd2FpdCBxdWVyeS5lZGl0X21lc3NhZ2VfdGV4dCgi4p2MINmE2YUg2YrYqtmFINin2YTYudir2YjYsSDYudmE2Ykg2YHZitiv2YrZiC4iKQogICAgICAgICAgICByZXR1cm4KICAgICAgICAKICAgICAgICB2aWRlb19pbmZvID0gY29udGV4dC51c2VyX2RhdGFbJ3BlbmRpbmdfdmlkZW8nXQogICAgICAgIGNoYXRfaWQgPSB2aWRlb19pbmZvWydjaGF0X2lkJ10KICAgICAgICBmaWxlX2lkID0gdmlkZW9faW5mb1snZmlsZV9pZCddCiAgICAgICAgZmlsZV9zaXplID0gdmlkZW9faW5mb1snZmlsZV9zaXplJ10KICAgICAgICAKICAgICAgICBkZWwgY29udGV4dC51c2VyX2RhdGFbJ3BlbmRpbmdfdmlkZW8nXQogICAgICAgIAogICAgICAgIHF1YWxpdHlfbmFtZXMgPSB7CiAgICAgICAgICAgICdoaWdoJzogJ/CflKUg2LnYp9mE2YrYqSAoMTA4MHApJywKICAgICAgICAgICAgJ21lZGl1bSc6ICfimpbvuI8g2YXYqtmI2LPYt9ipICg3MjBwKScsCiAgICAgICAgICAgICdsb3cnOiAn8J+SviDZhdmG2K7Zgdi22KkgKDQ4MHApJwogICAgICAgIH0KICAgICAgICAKICAgICAgICBxdWV1ZV9zaXplID0gcHJvY2Vzc2luZ19xdWV1ZS5xc2l6ZSgpCiAgICAgICAgc3RhdHVzX3RleHQgPSBmIuKchSDYqtmFINin2K7YqtmK2KfYsSDYp9mE2KzZiNiv2Kk6IHtxdWFsaXR5X25hbWVzLmdldChxdWFsaXR5LCAn2LnYp9iv2YrYqScpfVxuXG4iCiAgICAgICAgaWYgcXVldWVfc2l6ZSA+IDA6CiAgICAgICAgICAgIHN0YXR1c190ZXh0ICs9IGYi4o+zINmK2YjYrNivIHtxdWV1ZV9zaXplfSDZgdmK2K/ZitmIINmB2Yog2KfZhNi32KfYqNmI2LEuLi4iCiAgICAgICAgZWxzZToKICAgICAgICAgICAgc3RhdHVzX3RleHQgKz0gZiLij7Mg2KzYp9ix2Yog2YXYudin2YTYrNipINin2YTZgdmK2K/ZitmILi4uIgogICAgICAgICAgICAKICAgICAgICBhd2FpdCBxdWVyeS5lZGl0X21lc3NhZ2VfdGV4dChzdGF0dXNfdGV4dCkKICAgICAgICAKICAgICAgICBhd2FpdCBwcm9jZXNzaW5nX3F1ZXVlLnB1dCh7CiAgICAgICAgICAgICdjaGF0X2lkJzogY2hhdF9pZCwKICAgICAgICAgICAgJ3NvdXJjZSc6IGZpbGVfaWQsCiAgICAgICAgICAgICd0eXBlJzogJ2ZpbGVfaWQnLAogICAgICAgICAgICAnZmlsZV9zaXplJzogZmlsZV9zaXplLAogICAgICAgICAgICAncXVhbGl0eSc6IHF1YWxpdHkKICAgICAgICB9KQogICAgICAgIHJldHVybgogICAgCiAgICAjINmF2LnYp9mE2KzYqSDYp9iu2KrZitin2LEg2KzZiNiv2Kkg2KfZhNix2YjYp9io2LcKICAgIGlmIHF1ZXJ5LmRhdGEuc3RhcnRzd2l0aCgicXVhbGl0eV91cmxfIik6CiAgICAgICAgcXVhbGl0eSA9IHF1ZXJ5LmRhdGEucmVwbGFjZSgicXVhbGl0eV91cmxfIiwgIiIpCiAgICAgICAgCiAgICAgICAgaWYgJ3BlbmRpbmdfdmlkZW8nIG5vdCBpbiBjb250ZXh0LnVzZXJfZGF0YSBvciAndXJsJyBub3QgaW4gY29udGV4dC51c2VyX2RhdGFbJ3BlbmRpbmdfdmlkZW8nXToKICAgICAgICAgICAgYXdhaXQgcXVlcnkuZWRpdF9tZXNzYWdlX3RleHQoIuKdjCDZhNmFINmK2KrZhSDYp9mE2LnYq9mI2LEg2LnZhNmJINix2KfYqNi3LiIpCiAgICAgICAgICAgIHJldHVybgogICAgICAgIAogICAgICAgIHZpZGVvX2luZm8gPSBjb250ZXh0LnVzZXJfZGF0YVsncGVuZGluZ192aWRlbyddCiAgICAgICAgY2hhdF9pZCA9IHZpZGVvX2luZm9bJ2NoYXRfaWQnXQogICAgICAgIHVybCA9IHZpZGVvX2luZm9bJ3VybCddCiAgICAgICAgCiAgICAgICAgZGVsIGNvbnRleHQudXNlcl9kYXRhWydwZW5kaW5nX3ZpZGVvJ10KICAgICAgICAKICAgICAgICBxdWFsaXR5X25hbWVzID0gewogICAgICAgICAgICAnaGlnaCc6ICfwn5SlINi52KfZhNmK2KkgKDEwODBwKScsCiAgICAgICAgICAgICdtZWRpdW0nOiAn4pqW77iPINmF2KrZiNiz2LfYqSAoNzIwcCknLAogICAgICAgICAgICAnbG93JzogJ/Cfkr4g2YXZhtiu2YHYttipICg0ODBwKScKICAgICAgICB9CiAgICAgICAgCiAgICAgICAgcXVldWVfc2l6ZSA9IHByb2Nlc3NpbmdfcXVldWUucXNpemUoKQogICAgICAgIHN0YXR1c190ZXh0ID0gZiLinIUg2KrZhSDYp9iu2KrZitin2LEg2KfZhNis2YjYr9ipOiB7cXVhbGl0eV9uYW1lcy5nZXQocXVhbGl0eSwgJ9i52KfYr9mK2KknKX1cblxuIgogICAgICAgIGlmIHF1ZXVlX3NpemUgPiAwOgogICAgICAgICAgICBzdGF0dXNfdGV4dCArPSBmIuKPsyDZitmI2KzYryB7cXVldWVfc2l6ZX0g2YHZitiv2YrZiCDZgdmKINin2YTYt9in2KjZiNixLi4uIgogICAgICAgIGVsc2U6CiAgICAgICAgICAgIHN0YXR1c190ZXh0ICs9IGYi4o+zINis2KfYsdmKINmF2LnYp9mE2KzYqSDYp9mE2LHYp9io2LcuLi4iCgogICAgICAgIGF3YWl0IHF1ZXJ5LmVkaXRfbWVzc2FnZV90ZXh0KHN0YXR1c190ZXh0KQogICAgICAgIAogICAgICAgIGF3YWl0IHByb2Nlc3NpbmdfcXVldWUucHV0KHsKICAgICAgICAgICAgJ2NoYXRfaWQnOiBjaGF0X2lkLAogICAgICAgICAgICAnc291cmNlJzogdXJsLAogICAgICAgICAgICAndHlwZSc6ICd1cmwnLAogICAgICAgICAgICAnZmlsZV9zaXplJzogMCwKICAgICAgICAgICAgJ3F1YWxpdHknOiBxdWFsaXR5CiAgICAgICAgfSkKICAgICAgICByZXR1cm4KICAgIAogICAgaWYgcXVlcnkuZGF0YSA9PSAibXlfYWNjb3VudCI6CiAgICAgICAgdXNlcl9pZCA9IHF1ZXJ5LmZyb21fdXNlci5pZAogICAgICAgIHVzZXJfZGF0YSA9IGdldF91c2VyKHVzZXJfaWQpCiAgICAgICAgCiAgICAgICAgaWYgbm90IHVzZXJfZGF0YToKICAgICAgICAgICAgYXdhaXQgcXVlcnkuZWRpdF9tZXNzYWdlX3RleHQoItmK2LHYrNmJINin2YTYqNiv2KEg2KjYp9mE2KPZhdixIC9zdGFydCDYo9mI2YTYp9mLIikKICAgICAgICAgICAgcmV0dXJuCiAgICAgICAgCiAgICAgICAgdXNlcl9pZF9kYiwgdXNlcm5hbWUsIHRvdGFsX3ZpZGVvcywgam9pbmVkID0gdXNlcl9kYXRhCiAgICAgICAgCiAgICAgICAgYWNjb3VudF90ZXh0ID0gZiIiIgrwn5GkICoq2YXYudmE2YjZhdin2Kog2K3Ys9in2KjZgyoqCgrwn5OdINmF2LnYsdmBINin2YTZhdiz2KrYrtiv2YU6IGB7dXNlcl9pZH1gCvCfjqwg2KXYrNmF2KfZhNmKINin2YTZgdmK2K/ZitmI2YfYp9iqINin2YTZhdi52KfZhNis2Kk6IHt0b3RhbF92aWRlb3N9CvCfk4Ug2KrYp9ix2YrYriDYp9mE2KfZhti22YXYp9mFOiB7am9pbmVkLnNwbGl0KClbMF19CiIiIgogICAgICAgIGtleWJvYXJkX3Jvd3MgPSBbW0lubGluZUtleWJvYXJkQnV0dG9uKCLYudmI2K/YqSIsIGNhbGxiYWNrX2RhdGE9InN0YXJ0X21lbnUiKV1dCiAgICAgICAgaWYgcXVlcnkuZnJvbV91c2VyLmlkID09IEFETUlOX0lEOgogICAgICAgICAgICAga2V5Ym9hcmRfcm93cy5pbnNlcnQoMCwgW0lubGluZUtleWJvYXJkQnV0dG9uKCLimpnvuI8g2KXYudiv2KfYr9in2Kog2KfZhNmF2LTYsdmBIiwgY2FsbGJhY2tfZGF0YT0iYWRtaW5fc2V0dGluZ3MiKV0pCiAgICAgICAgCiAgICAgICAgcmVwbHlfbWFya3VwID0gSW5saW5lS2V5Ym9hcmRNYXJrdXAoa2V5Ym9hcmRfcm93cykKICAgICAgICBhd2FpdCBxdWVyeS5lZGl0X21lc3NhZ2VfdGV4dChhY2NvdW50X3RleHQsIHJlcGx5X21hcmt1cD1yZXBseV9tYXJrdXAsIHBhcnNlX21vZGU9J01hcmtkb3duJykKICAgIAogICAgZWxpZiBxdWVyeS5kYXRhID09ICJoZWxwIjoKICAgICAgICBoZWxwX3RleHQgPSAiIiIK4oS577iPICoq2YPZitmB2YrYqSDYp9mE2KfYs9iq2K7Yr9in2YU6KioKCioqMS4g2YXZhNmB2KfYqiDYqtmK2YTZitis2LHYp9mFICjYrdiq2YkgMTAwTUIpOioqCjHvuI/ig6Mg2KPYsdiz2YQg2YHZitiv2YrZiCDZhdio2KfYtNix2Kkg2YTZhNio2YjYqgoy77iP4oOjINin2K7YqtixINis2YjYr9ipINin2YTYtti62LcKM++4j+KDoyDYp9mG2KrYuNixINit2KrZiSDZitiq2YUg2KfZhNi22LrYtyDZiNin2YTYpdix2LPYp9mECgoqKjIuINin2YTYsdmI2KfYqNi3INin2YTYrtin2LHYrNmK2Kk6KioKMe+4j+KDoyDYo9ix2LPZhCDYsdin2KjYtyDZhdio2KfYtNixINmE2YTZgdmK2K/ZitmICjLvuI/ig6Mg2KfYrtiq2LEg2KzZiNiv2Kkg2KfZhNi22LrYtwoz77iP4oOjINin2YbYqti42LEg2KfZhNmF2LnYp9mE2KzYqQoK8J+OrCAqKtmF2LPYqtmI2YrYp9iqINin2YTYrNmI2K/YqToqKgrwn5SlINi52KfZhNmK2Kk6IDEwODBwIC0g2KPZgdi22YQg2KzZiNiv2KkK4pqW77iPINmF2KrZiNiz2LfYqTogNzIwcCAtINiq2YjYp9iy2YYg2YXYq9in2YTZigrwn5K+INmF2YbYrtmB2LbYqTogNDgwcCAtINij2YLZhCDYrdis2YUKCvCfl5HvuI8gKirZhdmE2KfYrdi42Kk6Kiog2YrYqtmFINit2LDZgSDYrNmF2YrYuSDYp9mE2YXZhNmB2KfYqiDYqtmE2YLYp9im2YrYp9mLINio2LnYryDYp9mE2KXYsdiz2KfZhCDZhNiq2YjZgdmK2LEg2KfZhNmF2LPYp9it2KkuCiIiIgogICAgICAgIGF3YWl0IHF1ZXJ5LmVkaXRfbWVzc2FnZV90ZXh0KGhlbHBfdGV4dCwgcmVwbHlfbWFya3VwPUlubGluZUtleWJvYXJkTWFya3VwKFtbSW5saW5lS2V5Ym9hcmRCdXR0b24oIti52YjYr9ipIiwgY2FsbGJhY2tfZGF0YT0ic3RhcnRfbWVudSIpXV0pKQogICAgCiAgICBlbGlmIHF1ZXJ5LmRhdGEgPT0gImFkbWluX3NldHRpbmdzIiBhbmQgcXVlcnkuZnJvbV91c2VyLmlkID09IEFETUlOX0lEOgogICAgICAgIHN0b3JhZ2VfaW5mbyA9IGdldF9zdG9yYWdlX2luZm8oKQogICAgICAgIGFkbWluX3RleHQgPSBmIiIiCvCfkZEgKirZhNmI2K3YqSDYqtit2YPZhSDYp9mE2YXYtNix2YEqKgoK8J+SviAqKtin2YTYqtiu2LLZitmGINin2YTZhdik2YLYqjoqKgrwn5OBINi52K/YryDYp9mE2YXZhNmB2KfYqjoge3N0b3JhZ2VfaW5mb1snZmlsZV9jb3VudCddfQrwn5OmINin2YTZhdiz2KfYrdipOiB7Zm9ybWF0X3NpemUoc3RvcmFnZV9pbmZvWyd0b3RhbF9zaXplJ10pfQoK2YrZhdmD2YbZgyDYpdiv2KfYsdipINin2YTZhdmE2YHYp9iqINmI2KfZhNil2LnYr9in2K/Yp9iqINmF2YYg2YfZhtinLgoiIiIKICAgICAgICBrZXlib2FyZCA9IFsKICAgICAgICAgICAgW0lubGluZUtleWJvYXJkQnV0dG9uKCLwn5OBINi52LHYtiDYp9mE2YXZhNmB2KfYqiDYp9mE2YXYpNmC2KrYqSIsIGNhbGxiYWNrX2RhdGE9ImFkbWluX3ZpZXdfZmlsZXMiKV0sCiAgICAgICAgICAgIFtJbmxpbmVLZXlib2FyZEJ1dHRvbigi8J+UkSDYpdi52K/Yp9iv2KfYqiBBUEkiLCBjYWxsYmFja19kYXRhPSJhZG1pbl9zZXRfYXBpX2tleSIpXSwKICAgICAgICAgICAgW0lubGluZUtleWJvYXJkQnV0dG9uKCLwn5OKINin2YTYpdit2LXYp9im2YrYp9iqIiwgY2FsbGJhY2tfZGF0YT0iYWRtaW5fc3RhdHMiKV0sCiAgICAgICAgICAgIFtJbmxpbmVLZXlib2FyZEJ1dHRvbigi2LnZiNiv2KkiLCBjYWxsYmFja19kYXRhPSJzdGFydF9tZW51IildCiAgICAgICAgXQogICAgICAgIGF3YWl0IHF1ZXJ5LmVkaXRfbWVzc2FnZV90ZXh0KGFkbWluX3RleHQsIHJlcGx5X21hcmt1cD1JbmxpbmVLZXlib2FyZE1hcmt1cChrZXlib2FyZCkpCiAgICAKICAgIGVsaWYgcXVlcnkuZGF0YSA9PSAiYWRtaW5fdmlld19maWxlcyIgYW5kIHF1ZXJ5LmZyb21fdXNlci5pZCA9PSBBRE1JTl9JRDoKICAgICAgICBzdG9yYWdlX2luZm8gPSBnZXRfc3RvcmFnZV9pbmZvKCkKICAgICAgICAKICAgICAgICBpZiBzdG9yYWdlX2luZm9bJ2ZpbGVfY291bnQnXSA9PSAwOgogICAgICAgICAgICBhd2FpdCBxdWVyeS5lZGl0X21lc3NhZ2VfdGV4dCgKICAgICAgICAgICAgICAgICLinIUg2YTYpyDYqtmI2KzYryDZhdmE2YHYp9iqINmF2KTZgtiq2KkuINin2YTZhdis2YTYryDZhti42YrZgSEg8J+nuSIsCiAgICAgICAgICAgICAgICByZXBseV9tYXJrdXA9SW5saW5lS2V5Ym9hcmRNYXJrdXAoW1tJbmxpbmVLZXlib2FyZEJ1dHRvbigi2LnZiNiv2KkiLCBjYWxsYmFja19kYXRhPSJhZG1pbl9zZXR0aW5ncyIpXV0pCiAgICAgICAgICAgICkKICAgICAgICAgICAgcmV0dXJuCiAgICAgICAgCiAgICAgICAgZmlsZXNfdGV4dCA9IGYi8J+TgSAqKtin2YTZhdmE2YHYp9iqINin2YTZhdik2YLYqtipICh7c3RvcmFnZV9pbmZvWydmaWxlX2NvdW50J119KToqKlxuIgogICAgICAgIGZpbGVzX3RleHQgKz0gZiLwn5OmINin2YTZhdiz2KfYrdipOiB7Zm9ybWF0X3NpemUoc3RvcmFnZV9pbmZvWyd0b3RhbF9zaXplJ10pfVxuXG4iCiAgICAgICAgCiAgICAgICAga2V5Ym9hcmQgPSBbXQogICAgICAgIGZvciBpZHgsIGZpbGVfaW5mbyBpbiBlbnVtZXJhdGUoc3RvcmFnZV9pbmZvWydmaWxlcyddWzoxMF0pOgogICAgICAgICAgICBmaWxlX25hbWUgPSBmaWxlX2luZm9bJ25hbWUnXQogICAgICAgICAgICBmaWxlX3NpemUgPSBmb3JtYXRfc2l6ZShmaWxlX2luZm9bJ3NpemUnXSkKICAgICAgICAgICAgZmlsZXNfdGV4dCArPSBmIntpZHgrMX0uIGB7ZmlsZV9uYW1lWzozMF19Li4uYCAtIHtmaWxlX3NpemV9XG4iCiAgICAgICAgICAgIAogICAgICAgICAgICBrZXlib2FyZC5hcHBlbmQoW0lubGluZUtleWJvYXJkQnV0dG9uKAogICAgICAgICAgICAgICAgZiLwn5eR77iPIHtmaWxlX25hbWVbOjI1XX0uLi4iLAogICAgICAgICAgICAgICAgY2FsbGJhY2tfZGF0YT1mImRlbGV0ZV9maWxlX3tmaWxlX25hbWV9IgogICAgICAgICAgICApXSkKICAgICAgICAKICAgICAgICBrZXlib2FyZC5hcHBlbmQoW0lubGluZUtleWJvYXJkQnV0dG9uKCLwn5eR77iPINit2LDZgSDYp9mE2YPZhCIsIGNhbGxiYWNrX2RhdGE9ImRlbGV0ZV9hbGxfZmlsZXMiKV0pCiAgICAgICAga2V5Ym9hcmQuYXBwZW5kKFtJbmxpbmVLZXlib2FyZEJ1dHRvbigi2LnZiNiv2KkiLCBjYWxsYmFja19kYXRhPSJhZG1pbl9zZXR0aW5ncyIpXSkKICAgICAgICAKICAgICAgICByZXBseV9tYXJrdXAgPSBJbmxpbmVLZXlib2FyZE1hcmt1cChrZXlib2FyZCkKICAgICAgICBhd2FpdCBxdWVyeS5lZGl0X21lc3NhZ2VfdGV4dChmaWxlc190ZXh0LCByZXBseV9tYXJrdXA9cmVwbHlfbWFya3VwLCBwYXJzZV9tb2RlPSdNYXJrZG93bicpCiAgICAgICAgCiAgICBlbGlmIHF1ZXJ5LmRhdGEgPT0gImFkbWluX3NldF9hcGlfa2V5IiBhbmQgcXVlcnkuZnJvbV91c2VyLmlkID09IEFETUlOX0lEOgogICAgICAgIGN1cnJlbnRfa2V5ID0gZ2V0X2FwaV9rZXkoKQogICAgICAgIGlmIGN1cnJlbnRfa2V5OgogICAgICAgICAgICBtYXNrZWRfa2V5ID0gJyonICogNCArIGN1cnJlbnRfa2V5Wy00Ol0gaWYgbGVuKGN1cnJlbnRfa2V5KSA+IDQgZWxzZSBjdXJyZW50X2tleQogICAgICAgICAgICByZXNwb25zZV90ZXh0ID0gZiLwn5SRINmF2YHYqtin2K0gQ2xvdWRDb252ZXJ0IEFQSSDYp9mE2K3Yp9mE2Yog2YrZhtiq2YfZiiDYqNmAOlxuYHttYXNrZWRfa2V5fWBcblxuKirZhNiq2LrZitmK2LEg2KfZhNmF2YHYqtin2K06KipcbmAvc2V0YXBpa2V5IFlPVVJfTkVXX0tFWWAiCiAgICAgICAgZWxzZToKICAgICAgICAgICAgcmVzcG9uc2VfdGV4dCA9ICLinYwg2YTZhSDZitiq2YUg2KrYudmK2YrZhiDZhdmB2KrYp9itIEFQSVxuXG4qKtmE2KrYudmK2YrZhiDYp9mE2YXZgdiq2KfYrToqKlxuYC9zZXRhcGlrZXkgWU9VUl9ORVdfS0VZYCIKICAgICAgICAgICAgCiAgICAgICAga2V5Ym9hcmQgPSBbW0lubGluZUtleWJvYXJkQnV0dG9uKCLYudmI2K/YqSIsIGNhbGxiYWNrX2RhdGE9ImFkbWluX3NldHRpbmdzIildXQogICAgICAgIGF3YWl0IHF1ZXJ5LmVkaXRfbWVzc2FnZV90ZXh0KHJlc3BvbnNlX3RleHQsIHJlcGx5X21hcmt1cD1JbmxpbmVLZXlib2FyZE1hcmt1cChrZXlib2FyZCksIHBhcnNlX21vZGU9J01hcmtkb3duJykKCiAgICBlbGlmIHF1ZXJ5LmRhdGEgPT0gImFkbWluX3N0YXRzIiBhbmQgcXVlcnkuZnJvbV91c2VyLmlkID09IEFETUlOX0lEOgogICAgICAgIGNvbm4gPSBzcWxpdGUzLmNvbm5lY3QoJ3ZpZGVvX2JvdC5kYicpCiAgICAgICAgYyA9IGNvbm4uY3Vyc29yKCkKICAgICAgICBjLmV4ZWN1dGUoJ1NFTEVDVCBDT1VOVCgqKSBGUk9NIHVzZXJzJykKICAgICAgICB0b3RhbF91c2VycyA9IGMuZmV0Y2hvbmUoKVswXQogICAgICAgIGMuZXhlY3V0ZSgnU0VMRUNUIFNVTSh0b3RhbF92aWRlb3MpIEZST00gdXNlcnMnKQogICAgICAgIHRvdGFsX3ZpZGVvc19wcm9jZXNzZWQgPSBjLmZldGNob25lKClbMF0gb3IgMAogICAgICAgIGNvbm4uY2xvc2UoKQogICAgICAgIAogICAgICAgIHN0b3JhZ2VfaW5mbyA9IGdldF9zdG9yYWdlX2luZm8oKQogICAgICAgIAogICAgICAgIHN0YXRzX3RleHQgPSBmIiIiCvCfk4ogKirYpdit2LXYp9im2YrYp9iqINin2YTYqNmI2KoqKgoK8J+RpCDYpdis2YXYp9mE2Yog2KfZhNmF2LPYqtiu2K/ZhdmK2YY6IHt0b3RhbF91c2Vyc30K8J+OrCDYpdis2YXYp9mE2Yog2KfZhNmB2YrYr9mK2YjZh9in2Ko6IHt0b3RhbF92aWRlb3NfcHJvY2Vzc2VkfQoK8J+SviAqKtin2YTYqtiu2LLZitmGOioqCvCfk4Eg2KfZhNmF2YTZgdin2Kog2KfZhNmF2KTZgtiq2Kk6IHtzdG9yYWdlX2luZm9bJ2ZpbGVfY291bnQnXX0K8J+TpiDYp9mE2YXYs9in2K3YqSDYp9mE2YXYs9iq2K7Yr9mF2Kk6IHtmb3JtYXRfc2l6ZShzdG9yYWdlX2luZm9bJ3RvdGFsX3NpemUnXSl9CiIiIgogICAgICAgIGtleWJvYXJkID0gW1tJbmxpbmVLZXlib2FyZEJ1dHRvbigi2LnZiNiv2KkiLCBjYWxsYmFja19kYXRhPSJhZG1pbl9zZXR0aW5ncyIpXV0KICAgICAgICBhd2FpdCBxdWVyeS5lZGl0X21lc3NhZ2VfdGV4dChzdGF0c190ZXh0LCByZXBseV9tYXJrdXA9SW5saW5lS2V5Ym9hcmRNYXJrdXAoa2V5Ym9hcmQpKQoKICAgIGVsaWYgcXVlcnkuZGF0YSA9PSAic3RhcnRfbWVudSI6CiAgICAgICAgdXNlciA9IHF1ZXJ5LmZyb21fdXNlcgogICAgICAgIGtleWJvYXJkX3Jvd3MgPSBbCiAgICAgICAgICAgIFtJbmxpbmVLZXlib2FyZEJ1dHRvbigi8J+TiiDYrdiz2KfYqNmKINmI2KXYrdi12KfYptmK2KfYqtmKIiwgY2FsbGJhY2tfZGF0YT0ibXlfYWNjb3VudCIpXSwKICAgICAgICAgICAgW0lubGluZUtleWJvYXJkQnV0dG9uKCLihLnvuI8g2KfZhNmF2LPYp9i52K/YqSIsIGNhbGxiYWNrX2RhdGE9ImhlbHAiKV0KICAgICAgICBdCiAgICAgICAgCiAgICAgICAgaWYgdXNlci5pZCA9PSBBRE1JTl9JRDoKICAgICAgICAgICAga2V5Ym9hcmRfcm93cy5hcHBlbmQoW0lubGluZUtleWJvYXJkQnV0dG9uKCLimpnvuI8g2KXYudiv2KfYr9in2Kog2KfZhNmF2LTYsdmBIiwgY2FsbGJhY2tfZGF0YT0iYWRtaW5fc2V0dGluZ3MiKV0pCgogICAgICAgIHJlcGx5X21hcmt1cCA9IElubGluZUtleWJvYXJkTWFya3VwKGtleWJvYXJkX3Jvd3MpCiAgICAgICAgCiAgICAgICAgd2VsY29tZV90ZXh0ID0gZiIiIgrwn46sINmF2LHYrdio2KfZiyB7dXNlci5maXJzdF9uYW1lfSEKCtij2YbYpyDYqNmI2Kog2LbYuti3INin2YTZgdmK2K/ZitmI2YfYp9iqIC0gKirZhdis2KfZhtmKINio2KfZhNmD2KfZhdmEKiog8J+agAoKKirwn46vINin2YTZhdmF2YrYstin2Ko6KioK4pyoINmF2LnYp9mE2KzYqSDZhdmE2YHYp9iqINit2KrZiSAxMDBNQgrinKgg2K/YudmFINin2YTYsdmI2KfYqNi3INin2YTYrtin2LHYrNmK2KkK4pyoIDMg2YXYs9iq2YjZitin2Kog2KzZiNiv2KkK4pyoINit2LDZgSDYqtmE2YLYp9im2Yog2YTZhNmF2YTZgdin2KoKCvCfk6Qg2KPYsdiz2YQg2YHZitiv2YrZiCDYo9mIINix2KfYqNi3INmE2YTYqNiv2KEhCiIiIgogICAgICAgIGF3YWl0IHF1ZXJ5LmVkaXRfbWVzc2FnZV90ZXh0KHdlbGNvbWVfdGV4dCwgcmVwbHlfbWFya3VwPXJlcGx5X21hcmt1cCkKCiMgPT09PT09PT09PT09PT09PT09PT0g2YXYudin2YTYrNipINin2YTZgdmK2K/ZitmIID09PT09PT09PT09PT09PT09PT09CmFzeW5jIGRlZiBkb3dubG9hZF9maWxlX2Zyb21fdGVsZWdyYW0oY29udGV4dCwgZmlsZV9pZDogc3RyLCBmaWxlX3NpemU6IGludCkgLT4gT3B0aW9uYWxbc3RyXToKICAgICIiItiq2K3ZhdmK2YQg2YXZhNmBINmF2YYg2KrZhNmK2KzYsdin2YUg2KXZhNmJINin2YTYqtiu2LLZitmGINin2YTZhdik2YLYqiIiIgogICAgdHJ5OgogICAgICAgIHByaW50KGYi8J+TpSDYqtit2YXZitmEINmF2YYgVGVsZWdyYW0uLi4g2KfZhNit2KzZhToge2ZpbGVfc2l6ZSAvICgxMDI0KjEwMjQpOi4yZn0gTUIiKQogICAgICAgIAogICAgICAgIGZpbGUgPSBhd2FpdCBjb250ZXh0LmJvdC5nZXRfZmlsZShmaWxlX2lkKQogICAgICAgIAogICAgICAgICMg2K3Zgdi4INmB2Yog2YXYrNmE2K8g2KfZhNiq2K7YstmK2YYg2KfZhNmF2KTZgtiqCiAgICAgICAgdGltZXN0YW1wID0gaW50KHRpbWUudGltZSgpKQogICAgICAgIHRlbXBfZmlsZW5hbWUgPSBmInZpZGVvX3t0aW1lc3RhbXB9X3tmaWxlX2lkWzoxMF19Lm1wNCIKICAgICAgICB0ZW1wX3BhdGggPSBvcy5wYXRoLmpvaW4oVEVNUF9TVE9SQUdFX0RJUiwgdGVtcF9maWxlbmFtZSkKICAgICAgICAKICAgICAgICBhd2FpdCBmaWxlLmRvd25sb2FkX3RvX2RyaXZlKHRlbXBfcGF0aCkKICAgICAgICBwcmludChmIuKchSDYqtmFINin2YTYqtit2YXZitmEOiB7dGVtcF9wYXRofSIpCiAgICAgICAgCiAgICAgICAgcmV0dXJuIHRlbXBfcGF0aAogICAgICAgIAogICAgZXhjZXB0IEV4Y2VwdGlvbiBhcyBlOgogICAgICAgIHByaW50KGYi4p2MINiu2LfYoyDZgdmKINin2YTYqtit2YXZitmEOiB7ZX0iKQogICAgICAgIHJldHVybiBOb25lCgpkZWYgZ2V0X3F1YWxpdHlfc2V0dGluZ3MocXVhbGl0eTogc3RyKSAtPiBkaWN0OgogICAgIiIi2KfZhNit2LXZiNmEINi52YTZiSDYpdi52K/Yp9iv2KfYqiDYp9mE2KzZiNiv2KkiIiIKICAgIGlmIHF1YWxpdHkgPT0gJ2hpZ2gnOgogICAgICAgIHJldHVybiB7CiAgICAgICAgICAgICJjcmYiOiAyMywKICAgICAgICAgICAgInByZXNldCI6ICJtZWRpdW0iLAogICAgICAgICAgICAid2lkdGgiOiAxOTIwLAogICAgICAgICAgICAiaGVpZ2h0IjogMTA4MCwKICAgICAgICAgICAgImF1ZGlvX2JpdHJhdGUiOiAxMjgsCiAgICAgICAgICAgICJhdWRpb19mcmVxdWVuY3kiOiA0NDEwMCwKICAgICAgICAgICAgImF1ZGlvX2NoYW5uZWxzIjogMiwKICAgICAgICAgICAgImZwcyI6IDMwCiAgICAgICAgfQogICAgZWxpZiBxdWFsaXR5ID09ICdtZWRpdW0nOgogICAgICAgIHJldHVybiB7CiAgICAgICAgICAgICJjcmYiOiAyOCwKICAgICAgICAgICAgInByZXNldCI6ICJzbG93IiwKICAgICAgICAgICAgIndpZHRoIjogMTI4MCwKICAgICAgICAgICAgImhlaWdodCI6IDcyMCwKICAgICAgICAgICAgImF1ZGlvX2JpdHJhdGUiOiA5NiwKICAgICAgICAgICAgImF1ZGlvX2ZyZXF1ZW5jeSI6IDQ0MTAwLAogICAgICAgICAgICAiYXVkaW9fY2hhbm5lbHMiOiAyLAogICAgICAgICAgICAiZnBzIjogMzAKICAgICAgICB9CiAgICBlbHNlOiAgIyBsb3cKICAgICAgICByZXR1cm4gewogICAgICAgICAgICAiY3JmIjogNDAsCiAgICAgICAgICAgICJwcmVzZXQiOiAidmVyeXNsb3ciLAogICAgICAgICAgICAid2lkdGgiOiA4NTQsCiAgICAgICAgICAgICJoZWlnaHQiOiA0ODAsCiAgICAgICAgICAgICJhdWRpb19iaXRyYXRlIjogNDgsCiAgICAgICAgICAgICJhdWRpb19mcmVxdWVuY3kiOiAyMjA1MCwKICAgICAgICAgICAgImF1ZGlvX2NoYW5uZWxzIjogMSwKICAgICAgICAgICAgImZwcyI6IDI0CiAgICAgICAgfQoKZGVmIGNvbXByZXNzX3ZpZGVvKHZpZGVvX3NvdXJjZTogc3RyLCBjaGF0X2lkOiBzdHIsIGNvbnRleHQsIHF1YWxpdHk6IHN0ciA9ICdsb3cnLCBpc191cmw6IGJvb2wgPSBUcnVlKSAtPiBPcHRpb25hbFtzdHJdOgogICAgIiIi2LbYuti3INin2YTZgdmK2K/ZitmIINio2KfYs9iq2K7Yr9in2YUgQ2xvdWRDb252ZXJ0IiIiCiAgICBhcGlfa2V5ID0gZ2V0X2FwaV9rZXkoKQogICAgaWYgbm90IGFwaV9rZXk6CiAgICAgICAgcmV0dXJuICJOT19BUElfS0VZX1NFVCIKCiAgICB0cnk6CiAgICAgICAgaGVhZGVycyA9IHsiQXV0aG9yaXphdGlvbiI6IGYiQmVhcmVyIHthcGlfa2V5fSJ9CiAgICAgICAgc2V0dGluZ3MgPSBnZXRfcXVhbGl0eV9zZXR0aW5ncyhxdWFsaXR5KQogICAgICAgIAogICAgICAgICMg2KrYrdiv2YrYryDYrdmF2YjZhNipIEpvYgogICAgICAgIGlmIGlzX3VybDoKICAgICAgICAgICAgam9iX3BheWxvYWQgPSB7CiAgICAgICAgICAgICAgICAidGFza3MiOiB7CiAgICAgICAgICAgICAgICAgICAgImltcG9ydC12aWRlbyI6IHsib3BlcmF0aW9uIjogImltcG9ydC91cmwiLCAidXJsIjogdmlkZW9fc291cmNlLCAiZmlsZW5hbWUiOiAidmlkZW8ubXA0In0sCiAgICAgICAgICAgICAgICAgICAgImNvbXByZXNzLXZpZGVvIjogewogICAgICAgICAgICAgICAgICAgICAgICAib3BlcmF0aW9uIjogImNvbnZlcnQiLCAiaW5wdXQiOiAiaW1wb3J0LXZpZGVvIiwgIm91dHB1dF9mb3JtYXQiOiAibXA0IiwKICAgICAgICAgICAgICAgICAgICAgICAgInZpZGVvX2NvZGVjIjogIngyNjQiLCAiY3JmIjogc2V0dGluZ3NbImNyZiJdLCAicHJlc2V0Ijogc2V0dGluZ3NbInByZXNldCJdLAogICAgICAgICAgICAgICAgICAgICAgICAid2lkdGgiOiBzZXR0aW5nc1sid2lkdGgiXSwgImhlaWdodCI6IHNldHRpbmdzWyJoZWlnaHQiXSwKICAgICAgICAgICAgICAgICAgICAgICAgImF1ZGlvX2NvZGVjIjogImFhYyIsICJhdWRpb19iaXRyYXRlIjogc2V0dGluZ3NbImF1ZGlvX2JpdHJhdGUiXSwgCiAgICAgICAgICAgICAgICAgICAgICAgICJhdWRpb19mcmVxdWVuY3kiOiBzZXR0aW5nc1siYXVkaW9fZnJlcXVlbmN5Il0sICJhdWRpb19jaGFubmVscyI6IHNldHRpbmdzWyJhdWRpb19jaGFubmVscyJdLCAKICAgICAgICAgICAgICAgICAgICAgICAgInN0cmlwX21ldGFkYXRhIjogVHJ1ZSwgImZwcyI6IHNldHRpbmdzWyJmcHMiXQogICAgICAgICAgICAgICAgICAgIH0sCiAgICAgICAgICAgICAgICAgICAgImV4cG9ydC12aWRlbyI6IHsib3BlcmF0aW9uIjogImV4cG9ydC91cmwiLCAiaW5wdXQiOiAiY29tcHJlc3MtdmlkZW8ifQogICAgICAgICAgICAgICAgfQogICAgICAgICAgICB9CiAgICAgICAgZWxzZToKICAgICAgICAgICAgam9iX3BheWxvYWQgPSB7CiAgICAgICAgICAgICAgICAidGFza3MiOiB7CiAgICAgICAgICAgICAgICAgICAgImltcG9ydC12aWRlbyI6IHsib3BlcmF0aW9uIjogImltcG9ydC91cGxvYWQifSwKICAgICAgICAgICAgICAgICAgICAiY29tcHJlc3MtdmlkZW8iOiB7CiAgICAgICAgICAgICAgICAgICAgICAgICJvcGVyYXRpb24iOiAiY29udmVydCIsICJpbnB1dCI6ICJpbXBvcnQtdmlkZW8iLCAib3V0cHV0X2Zvcm1hdCI6ICJtcDQiLAogICAgICAgICAgICAgICAgICAgICAgICAidmlkZW9fY29kZWMiOiAieDI2NCIsICJjcmYiOiBzZXR0aW5nc1siY3JmIl0sICJwcmVzZXQiOiBzZXR0aW5nc1sicHJlc2V0Il0sCiAgICAgICAgICAgICAgICAgICAgICAgICJ3aWR0aCI6IHNldHRpbmdzWyJ3aWR0aCJdLCAiaGVpZ2h0Ijogc2V0dGluZ3NbImhlaWdodCJdLAogICAgICAgICAgICAgICAgICAgICAgICAiYXVkaW9fY29kZWMiOiAiYWFjIiwgImF1ZGlvX2JpdHJhdGUiOiBzZXR0aW5nc1siYXVkaW9fYml0cmF0ZSJdLCAKICAgICAgICAgICAgICAgICAgICAgICAgImF1ZGlvX2ZyZXF1ZW5jeSI6IHNldHRpbmdzWyJhdWRpb19mcmVxdWVuY3kiXSwgImF1ZGlvX2NoYW5uZWxzIjogc2V0dGluZ3NbImF1ZGlvX2NoYW5uZWxzIl0sIAogICAgICAgICAgICAgICAgICAgICAgICAic3RyaXBfbWV0YWRhdGEiOiBUcnVlLCAiZnBzIjogc2V0dGluZ3NbImZwcyJdCiAgICAgICAgICAgICAgICAgICAgfSwKICAgICAgICAgICAgICAgICAgICAiZXhwb3J0LXZpZGVvIjogeyJvcGVyYXRpb24iOiAiZXhwb3J0L3VybCIsICJpbnB1dCI6ICJjb21wcmVzcy12aWRlbyJ9CiAgICAgICAgICAgICAgICB9CiAgICAgICAgICAgIH0KICAgICAgICAKICAgICAgICByZXNwb25zZSA9IHJlcXVlc3RzLnBvc3QoCiAgICAgICAgICAgICJodHRwczovL2FwaS5jbG91ZGNvbnZlcnQuY29tL3YyL2pvYnMiLAogICAgICAgICAgICBqc29uPWpvYl9wYXlsb2FkLAogICAgICAgICAgICBoZWFkZXJzPWhlYWRlcnMKICAgICAgICApCiAgICAgICAgCiAgICAgICAgaWYgcmVzcG9uc2Uuc3RhdHVzX2NvZGUgIT0gMjAxOgogICAgICAgICAgICBwcmludChmIuKdjCDZgdi02YQg2KXZhti02KfYoSBKb2I6IHtyZXNwb25zZS50ZXh0fSIpCiAgICAgICAgICAgIHJldHVybiBOb25lCiAgICAgICAgICAgIAogICAgICAgIGpvYl9kYXRhID0gcmVzcG9uc2UuanNvbigpWyJkYXRhIl0KICAgICAgICBqb2JfaWQgPSBqb2JfZGF0YVsiaWQiXQogICAgICAgIAogICAgICAgICMg2LHZgdi5INin2YTZhdmE2YEg2KXYsNinINmD2KfZhiDZhdit2YTZitin2YsKICAgICAgICBpZiBub3QgaXNfdXJsOgogICAgICAgICAgICBpbXBvcnRfdGFzayA9IG5leHQoKHQgZm9yIHQgaW4gam9iX2RhdGFbInRhc2tzIl0gaWYgdFsibmFtZSJdID09ICJpbXBvcnQtdmlkZW8iKSwgTm9uZSkKICAgICAgICAgICAgaWYgbm90IGltcG9ydF90YXNrOgogICAgICAgICAgICAgICAgcmV0dXJuIE5vbmUKICAgICAgICAgICAgCiAgICAgICAgICAgIHVwbG9hZF91cmwgPSBpbXBvcnRfdGFza1sicmVzdWx0Il1bImZvcm0iXVsidXJsIl0KICAgICAgICAgICAgdXBsb2FkX3BhcmFtcyA9IGltcG9ydF90YXNrWyJyZXN1bHQiXVsiZm9ybSJdWyJwYXJhbWV0ZXJzIl0KICAgICAgICAgICAgCiAgICAgICAgICAgIHdpdGggb3Blbih2aWRlb19zb3VyY2UsICdyYicpIGFzIGY6CiAgICAgICAgICAgICAgICBmaWxlcyA9IHsnZmlsZSc6IGZ9CiAgICAgICAgICAgICAgICB1cGxvYWRfcmVzcG9uc2UgPSByZXF1ZXN0cy5wb3N0KHVwbG9hZF91cmwsIGRhdGE9dXBsb2FkX3BhcmFtcywgZmlsZXM9ZmlsZXMpCiAgICAgICAgICAgIAogICAgICAgICAgICBpZiB1cGxvYWRfcmVzcG9uc2Uuc3RhdHVzX2NvZGUgbm90IGluIFsyMDAsIDIwMV06CiAgICAgICAgICAgICAgICBwcmludChmIuKdjCDZgdi02YQg2LHZgdi5INin2YTZhdmE2YE6IHt1cGxvYWRfcmVzcG9uc2UudGV4dH0iKQogICAgICAgICAgICAgICAgcmV0dXJuIE5vbmUKICAgICAgICAgICAgCiAgICAgICAgICAgIHByaW50KCLinIUg2KrZhSDYsdmB2Lkg2KfZhNmF2YTZgSDZhNmAIENsb3VkQ29udmVydCIpCiAgICAgICAgICAgIAogICAgICAgICAgICAjINit2LDZgSDYp9mE2YXZhNmBINin2YTZhdit2YTZiiDZgdmI2LHYp9mLINio2LnYryDYp9mE2LHZgdi5CiAgICAgICAgICAgIGRlbGV0ZV9maWxlX3NhZmUodmlkZW9fc291cmNlKQogICAgICAgIAogICAgICAgICMg2KfZhtiq2LjYp9ixINin2YPYqtmF2KfZhCDYp9mE2YXYudin2YTYrNipCiAgICAgICAgbWF4X2F0dGVtcHRzID0gMTgwCiAgICAgICAgYXR0ZW1wdCA9IDAKICAgICAgICAKICAgICAgICB3aGlsZSBhdHRlbXB0IDwgbWF4X2F0dGVtcHRzOgogICAgICAgICAgICBqb2Jfc3RhdHVzID0gcmVxdWVzdHMuZ2V0KAogICAgICAgICAgICAgICAgZiJodHRwczovL2FwaS5jbG91ZGNvbnZlcnQuY29tL3YyL2pvYnMve2pvYl9pZH0iLAogICAgICAgICAgICAgICAgaGVhZGVycz1oZWFkZXJzCiAgICAgICAgICAgICkuanNvbigpCiAgICAgICAgICAgIAogICAgICAgICAgICBzdGF0dXMgPSBqb2Jfc3RhdHVzWyJkYXRhIl1bInN0YXR1cyJdCiAgICAgICAgICAgIAogICAgICAgICAgICBpZiBzdGF0dXMgPT0gImZpbmlzaGVkIjoKICAgICAgICAgICAgICAgIHRhc2tzID0gam9iX3N0YXR1c1siZGF0YSJdWyJ0YXNrcyJdCiAgICAgICAgICAgICAgICBleHBvcnRfdGFzayA9IG5leHQoKHQgZm9yIHQgaW4gdGFza3MgaWYgdFsibmFtZSJdID09ICJleHBvcnQtdmlkZW8iKSwgTm9uZSkKICAgICAgICAgICAgICAgIAogICAgICAgICAgICAgICAgaWYgZXhwb3J0X3Rhc2sgYW5kIGV4cG9ydF90YXNrLmdldCgicmVzdWx0IikgYW5kIGV4cG9ydF90YXNrWyJyZXN1bHQiXS5nZXQoImZpbGVzIik6CiAgICAgICAgICAgICAgICAgICAgZG93bmxvYWRfdXJsID0gZXhwb3J0X3Rhc2tbInJlc3VsdCJdWyJmaWxlcyJdWzBdWyJ1cmwiXQogICAgICAgICAgICAgICAgICAgIGZpbGVfc2l6ZSA9IGV4cG9ydF90YXNrWyJyZXN1bHQiXVsiZmlsZXMiXVswXS5nZXQoInNpemUiLCAwKQogICAgICAgICAgICAgICAgICAgIGZpbGVfc2l6ZV9tYiA9IGZpbGVfc2l6ZSAvICgxMDI0KjEwMjQpCiAgICAgICAgICAgICAgICAgICAgcHJpbnQoZiLinIUg2KfZg9iq2YXZhCDYp9mE2LbYuti3ISDYp9mE2K3YrNmFOiB7ZmlsZV9zaXplX21iOi4yZn0gTUIiKQogICAgICAgICAgICAgICAgICAgIHJldHVybiBkb3dubG9hZF91cmwKICAgICAgICAgICAgICAgICAgICAKICAgICAgICAgICAgZWxpZiBzdGF0dXMgPT0gImVycm9yIjoKICAgICAgICAgICAgICAgIHByaW50KGYi4p2MINiu2LfYoyDZgdmKINin2YTZhdi52KfZhNis2Kk6IHtqb2Jfc3RhdHVzfSIpCiAgICAgICAgICAgICAgICByZXR1cm4gTm9uZQogICAgICAgICAgICAgICAgCiAgICAgICAgICAgIHRpbWUuc2xlZXAoNSkKICAgICAgICAgICAgYXR0ZW1wdCArPSAxCiAgICAgICAgCiAgICAgICAgcHJpbnQoIuKdjCDYp9mG2KrZh9mJINin2YTZiNmC2KoiKQogICAgICAgIHJldHVybiBOb25lCiAgICAgICAgCiAgICBleGNlcHQgRXhjZXB0aW9uIGFzIGU6CiAgICAgICAgcHJpbnQoZiLinYwg2K7Yt9ijOiB7ZX0iKQogICAgICAgIHJldHVybiBOb25lCgpkZWYgc2VuZF9jb21wcmVzc2VkX3ZpZGVvX2FkdmFuY2VkKGNoYXRfaWQ6IHN0ciwgdmlkZW9fdXJsOiBzdHIsIGNhcHRpb246IHN0ciA9ICLinIUg2KrZhSDYtti62Lcg2KfZhNmB2YrYr9mK2YghIikgLT4gdHVwbGU6CiAgICAiIiLYpdix2LPYp9mEINin2YTZgdmK2K/ZitmIINin2YTZhdi22LrZiNi3INmF2Lkg2K3YsNmBINiq2YTZgtin2KbZiiIiIgogICAgdGVtcF9maWxlX3BhdGggPSBOb25lCiAgICBtYXhfcmV0cmllcyA9IDMKICAgIAogICAgZm9yIGF0dGVtcHQgaW4gcmFuZ2UobWF4X3JldHJpZXMpOgogICAgICAgIHRyeToKICAgICAgICAgICAgcHJpbnQoZiLwn5OkINmF2K3Yp9mI2YTYqSDYp9mE2KXYsdiz2KfZhCAoe2F0dGVtcHQgKyAxfS97bWF4X3JldHJpZXN9KS4uLiIpCiAgICAgICAgICAgIHNlbmRfdXJsID0gZiJodHRwczovL2FwaS50ZWxlZ3JhbS5vcmcvYm90e1RFTEVHUkFNX0JPVF9UT0tFTn0vc2VuZFZpZGVvIgogICAgICAgICAgICAKICAgICAgICAgICAgIyDZhdit2KfZiNmE2Kkg2KfZhNil2LHYs9in2YQg2KfZhNmF2KjYp9i02LEg2KPZiNmE2KfZiwogICAgICAgICAgICByZXNwb25zZSA9IHJlcXVlc3RzLnBvc3QoCiAgICAgICAgICAgICAgICBzZW5kX3VybCwKICAgICAgICAgICAgICAgIGRhdGE9ewogICAgICAgICAgICAgICAgICAgICJjaGF0X2lkIjogY2hhdF9pZCwKICAgICAgICAgICAgICAgICAgICAidmlkZW8iOiB2aWRlb191cmwsCiAgICAgICAgICAgICAgICAgICAgImNhcHRpb24iOiBjYXB0aW9uLAogICAgICAgICAgICAgICAgICAgICJzdXBwb3J0c19zdHJlYW1pbmciOiBUcnVlCiAgICAgICAgICAgICAgICB9LAogICAgICAgICAgICAgICAgdGltZW91dD02MDAKICAgICAgICAgICAgKQogICAgICAgICAgICAKICAgICAgICAgICAgaWYgcmVzcG9uc2Uuc3RhdHVzX2NvZGUgPT0gMjAwOgogICAgICAgICAgICAgICAgcHJpbnQoZiLinIUg2YbYrNitINin2YTYpdix2LPYp9mEINin2YTZhdio2KfYtNixIikKICAgICAgICAgICAgICAgIHJldHVybiBUcnVlLCBOb25lCiAgICAgICAgICAgIGVsc2U6CiAgICAgICAgICAgICAgICBwcmludChmIuKaoO+4jyDZgdi02YQg2KfZhNil2LHYs9in2YQg2KfZhNmF2KjYp9i02LE6IHtyZXNwb25zZS5zdGF0dXNfY29kZX0iKQogICAgICAgICAgICAgICAgCiAgICAgICAgZXhjZXB0IEV4Y2VwdGlvbiBhcyBlOgogICAgICAgICAgICBwcmludChmIuKdjCDYrti32KMg2YHZiiDYp9mE2KXYsdiz2KfZhCDYp9mE2YXYqNin2LTYsToge2V9IikKICAgICAgICAKICAgICAgICAjINin2YTYqtit2YXZitmEINmI2KfZhNil2LHYs9in2YQg2KfZhNmF2K3ZhNmKCiAgICAgICAgaWYgYXR0ZW1wdCA9PSBtYXhfcmV0cmllcyAtIDE6CiAgICAgICAgICAgIHRyeToKICAgICAgICAgICAgICAgIHByaW50KCLwn5SEINis2KfYsdmKINin2YTYqtit2YXZitmEINin2YTZhdit2YTZii4uLiIpCiAgICAgICAgICAgICAgICAKICAgICAgICAgICAgICAgICMg2KrYrdmF2YrZhCDYp9mE2YHZitiv2YrZiAogICAgICAgICAgICAgICAgdmlkZW9fcmVzcG9uc2UgPSByZXF1ZXN0cy5nZXQodmlkZW9fdXJsLCB0aW1lb3V0PTMwMCwgc3RyZWFtPVRydWUpCiAgICAgICAgICAgICAgICAKICAgICAgICAgICAgICAgIGlmIHZpZGVvX3Jlc3BvbnNlLnN0YXR1c19jb2RlICE9IDIwMDoKICAgICAgICAgICAgICAgICAgICBwcmludChmIuKdjCDZgdi02YQg2KrYrdmF2YrZhCDYp9mE2YHZitiv2YrZiDoge3ZpZGVvX3Jlc3BvbnNlLnN0YXR1c19jb2RlfSIpCiAgICAgICAgICAgICAgICAgICAgcmV0dXJuIEZhbHNlLCBOb25lCiAgICAgICAgICAgICAgICAKICAgICAgICAgICAgICAgICMg2K3Zgdi4INmB2Yog2KfZhNmF2KzZhNivINin2YTZhdik2YLYqgogICAgICAgICAgICAgICAgdGltZXN0YW1wID0gaW50KHRpbWUudGltZSgpKQogICAgICAgICAgICAgICAgdGVtcF9maWxlbmFtZSA9IGYiY29tcHJlc3NlZF97dGltZXN0YW1wfS5tcDQiCiAgICAgICAgICAgICAgICB0ZW1wX2ZpbGVfcGF0aCA9IG9zLnBhdGguam9pbihURU1QX1NUT1JBR0VfRElSLCB0ZW1wX2ZpbGVuYW1lKQogICAgICAgICAgICAgICAgCiAgICAgICAgICAgICAgICB3aXRoIG9wZW4odGVtcF9maWxlX3BhdGgsICd3YicpIGFzIHRlbXBfZmlsZToKICAgICAgICAgICAgICAgICAgICBmb3IgY2h1bmsgaW4gdmlkZW9fcmVzcG9uc2UuaXRlcl9jb250ZW50KGNodW5rX3NpemU9ODE5Mik6CiAgICAgICAgICAgICAgICAgICAgICAgIGlmIGNodW5rOgogICAgICAgICAgICAgICAgICAgICAgICAgICAgdGVtcF9maWxlLndyaXRlKGNodW5rKQogICAgICAgICAgICAgICAgCiAgICAgICAgICAgICAgICBmaWxlX3NpemVfbWIgPSBvcy5wYXRoLmdldHNpemUodGVtcF9maWxlX3BhdGgpIC8gKDEwMjQqMTAyNCkKICAgICAgICAgICAgICAgIHByaW50KGYi4pyFINiq2YUg2KfZhNiq2K3ZhdmK2YQg2KfZhNmF2K3ZhNmKOiB7ZmlsZV9zaXplX21iOi4yZn0gTUIiKQogICAgICAgICAgICAgICAgCiAgICAgICAgICAgICAgICAjINil2LHYs9in2YQg2KfZhNmF2YTZgQogICAgICAgICAgICAgICAgcHJpbnQoIvCfk6Qg2KzYp9ix2Yog2KXYsdiz2KfZhCDYp9mE2YXZhNmBINin2YTZhdit2YTZii4uLiIpCiAgICAgICAgICAgICAgICB3aXRoIG9wZW4odGVtcF9maWxlX3BhdGgsICdyYicpIGFzIHZpZGVvX2ZpbGU6CiAgICAgICAgICAgICAgICAgICAgZmlsZXMgPSB7J3ZpZGVvJzogdmlkZW9fZmlsZX0KICAgICAgICAgICAgICAgICAgICBkYXRhID0geydjaGF0X2lkJzogY2hhdF9pZCwgJ2NhcHRpb24nOiBjYXB0aW9uLCAnc3VwcG9ydHNfc3RyZWFtaW5nJzogVHJ1ZX0KICAgICAgICAgICAgICAgICAgICAKICAgICAgICAgICAgICAgICAgICByZXNwb25zZSA9IHJlcXVlc3RzLnBvc3Qoc2VuZF91cmwsIGRhdGE9ZGF0YSwgZmlsZXM9ZmlsZXMsIHRpbWVvdXQ9NjAwKQogICAgICAgICAgICAgICAgCiAgICAgICAgICAgICAgICBpZiByZXNwb25zZS5zdGF0dXNfY29kZSA9PSAyMDA6CiAgICAgICAgICAgICAgICAgICAgcHJpbnQoIuKchSDZhtis2K0g2KXYsdiz2KfZhCDYp9mE2YXZhNmBINin2YTZhdit2YTZiiEiKQogICAgICAgICAgICAgICAgICAgIHJldHVybiBUcnVlLCB0ZW1wX2ZpbGVfcGF0aAogICAgICAgICAgICAgICAgZWxzZToKICAgICAgICAgICAgICAgICAgICBwcmludChmIuKdjCDZgdi02YQg2KXYsdiz2KfZhCDYp9mE2YXZhNmBOiB7cmVzcG9uc2Uuc3RhdHVzX2NvZGV9IikKICAgICAgICAgICAgICAgICAgICByZXR1cm4gRmFsc2UsIHRlbXBfZmlsZV9wYXRoCiAgICAgICAgICAgICAgICAgICAgCiAgICAgICAgICAgIGV4Y2VwdCBFeGNlcHRpb24gYXMgZToKICAgICAgICAgICAgICAgIHByaW50KGYi4p2MINiu2LfYoyDZgdmKINin2YTYpdix2LPYp9mEINin2YTZhdit2YTZijoge2V9IikKICAgICAgICAgICAgICAgIHJldHVybiBGYWxzZSwgdGVtcF9maWxlX3BhdGgKICAgICAgICAKICAgICAgICBpZiBhdHRlbXB0IDwgbWF4X3JldHJpZXMgLSAxOgogICAgICAgICAgICB0aW1lLnNsZWVwKDUpCiAgICAKICAgIHJldHVybiBGYWxzZSwgdGVtcF9maWxlX3BhdGgKCmFzeW5jIGRlZiBwcm9jZXNzX3ZpZGVvX3F1ZXVlKGNvbnRleHQpOgogICAgIiIi2YXYudin2YTYrCDYt9in2KjZiNixINin2YTZgdmK2K/ZitmIIiIiCiAgICBnbG9iYWwgaXNfcHJvY2Vzc2luZwogICAgCiAgICB3aGlsZSBUcnVlOgogICAgICAgIHRyeToKICAgICAgICAgICAgdmlkZW9fZGF0YSA9IGF3YWl0IHByb2Nlc3NpbmdfcXVldWUuZ2V0KCkKICAgICAgICAgICAgCiAgICAgICAgICAgIGlzX3Byb2Nlc3NpbmcgPSBUcnVlCiAgICAgICAgICAgIGNoYXRfaWQgPSB2aWRlb19kYXRhWydjaGF0X2lkJ10KICAgICAgICAgICAgdXNlcl9pZCA9IGludChjaGF0X2lkKQogICAgICAgICAgICB2aWRlb19zb3VyY2UgPSB2aWRlb19kYXRhWydzb3VyY2UnXQogICAgICAgICAgICBzb3VyY2VfdHlwZSA9IHZpZGVvX2RhdGFbJ3R5cGUnXQogICAgICAgICAgICBmaWxlX3NpemUgPSB2aWRlb19kYXRhLmdldCgnZmlsZV9zaXplJywgMCkKICAgICAgICAgICAgcXVhbGl0eSA9IHZpZGVvX2RhdGEuZ2V0KCdxdWFsaXR5JywgJ2xvdycpCiAgICAgICAgICAgIAogICAgICAgICAgICBwcmludChmIvCfjqwg2KjYr9ihINmF2LnYp9mE2KzYqToge2NoYXRfaWR9IC0ge3NvdXJjZV90eXBlfSAtIHtxdWFsaXR5fSIpCiAgICAgICAgICAgIAogICAgICAgICAgICBjb21wcmVzc2VkX3VybCA9IE5vbmUKICAgICAgICAgICAgbG9jYWxfZmlsZV90b19kZWxldGUgPSBOb25lCiAgICAgICAgICAgIAogICAgICAgICAgICAjINmF2LnYp9mE2KzYqSDYrdiz2Kgg2KfZhNmG2YjYuQogICAgICAgICAgICBpZiBzb3VyY2VfdHlwZSA9PSAndXJsJzoKICAgICAgICAgICAgICAgIGF3YWl0IHNlbmRfbWVzc2FnZShjaGF0X2lkLCAi4o+zINis2KfYsdmKINmF2LnYp9mE2KzYqSDYp9mE2LHYp9io2LcuLi4iLCBjb250ZXh0KQogICAgICAgICAgICAgICAgY29tcHJlc3NlZF91cmwgPSBjb21wcmVzc192aWRlbyh2aWRlb19zb3VyY2UsIGNoYXRfaWQsIGNvbnRleHQsIHF1YWxpdHksIGlzX3VybD1UcnVlKQogICAgICAgICAgICAgICAgCiAgICAgICAgICAgIGVsaWYgc291cmNlX3R5cGUgPT0gJ2ZpbGVfaWQnOgogICAgICAgICAgICAgICAgaWYgZmlsZV9zaXplIDw9IE1BWF9GSUxFX1NJWkU6CiAgICAgICAgICAgICAgICAgICAgYXdhaXQgc2VuZF9tZXNzYWdlKGNoYXRfaWQsICLwn5OlINis2KfYsdmKINiq2K3ZhdmK2YQg2KfZhNmB2YrYr9mK2YguLi4iLCBjb250ZXh0KQogICAgICAgICAgICAgICAgICAgIGxvY2FsX2ZpbGUgPSBhd2FpdCBkb3dubG9hZF9maWxlX2Zyb21fdGVsZWdyYW0oY29udGV4dCwgdmlkZW9fc291cmNlLCBmaWxlX3NpemUpCiAgICAgICAgICAgICAgICAgICAgCiAgICAgICAgICAgICAgICAgICAgaWYgbG9jYWxfZmlsZToKICAgICAgICAgICAgICAgICAgICAgICAgbG9jYWxfZmlsZV90b19kZWxldGUgPSBsb2NhbF9maWxlCiAgICAgICAgICAgICAgICAgICAgICAgIGF3YWl0IHNlbmRfbWVzc2FnZShjaGF0X2lkLCAi4o+zINis2KfYsdmKINi22LrYtyDYp9mE2YHZitiv2YrZiC4uLiIsIGNvbnRleHQpCiAgICAgICAgICAgICAgICAgICAgICAgIGNvbXByZXNzZWRfdXJsID0gY29tcHJlc3NfdmlkZW8obG9jYWxfZmlsZSwgY2hhdF9pZCwgY29udGV4dCwgcXVhbGl0eSwgaXNfdXJsPUZhbHNlKQogICAgICAgICAgICAgICAgICAgIGVsc2U6CiAgICAgICAgICAgICAgICAgICAgICAgIGF3YWl0IHNlbmRfbWVzc2FnZShjaGF0X2lkLCAi4p2MINmB2LTZhCDYqtit2YXZitmEINin2YTZgdmK2K/ZitmILiIsIGNvbnRleHQpCiAgICAgICAgICAgICAgICBlbHNlOgogICAgICAgICAgICAgICAgICAgIGF3YWl0IHNlbmRfbWVzc2FnZShjaGF0X2lkLCBmIuKdjCDYp9mE2YXZhNmBINmD2KjZitixINis2K/Yp9mLICh7ZmlsZV9zaXplLygxMDI0KjEwMjQpOi4yZn0gTUIpLiDYp9mE2K3YryDYp9mE2KPZgti12YkgMTAwTUIuIiwgY29udGV4dCkKICAgICAgICAgICAgCiAgICAgICAgICAgICMg2KXYsdiz2KfZhCDYp9mE2YbYqtmK2KzYqQogICAgICAgICAgICBpZiBjb21wcmVzc2VkX3VybCA9PSAiTk9fQVBJX0tFWV9TRVQiOgogICAgICAgICAgICAgICAgYXdhaXQgc2VuZF9tZXNzYWdlKGNoYXRfaWQsICLinYwg2YTZhSDZitiq2YUg2KrYudmK2YrZhiDZhdmB2KrYp9itIEFQSS4g2KPYqNmE2Log2KfZhNmF2LTYsdmBLiIsIGNvbnRleHQpCiAgICAgICAgICAgICAgICAKICAgICAgICAgICAgZWxpZiBjb21wcmVzc2VkX3VybDoKICAgICAgICAgICAgICAgIHF1YWxpdHlfbmFtZXMgPSB7J2hpZ2gnOiAn8J+UpSDYudin2YTZitipJywgJ21lZGl1bSc6ICfimpbvuI8g2YXYqtmI2LPYt9ipJywgJ2xvdyc6ICfwn5K+INmF2YbYrtmB2LbYqSd9CiAgICAgICAgICAgICAgICBjYXB0aW9uID0gZiLinIUg2KrZhSDYp9mE2LbYuti3INio2YbYrNin2K0hXG7wn46sINin2YTYrNmI2K/YqToge3F1YWxpdHlfbmFtZXMuZ2V0KHF1YWxpdHksICfYudin2K/ZitipJyl9IgogICAgICAgICAgICAgICAgCiAgICAgICAgICAgICAgICBhd2FpdCBzZW5kX21lc3NhZ2UoY2hhdF9pZCwgIvCfk6Qg2KzYp9ix2Yog2KXYsdiz2KfZhCDYp9mE2YHZitiv2YrZiC4uLiIsIGNvbnRleHQpCiAgICAgICAgICAgICAgICAKICAgICAgICAgICAgICAgIHNlbmRfc3VjY2VzcywgdGVtcF9maWxlID0gc2VuZF9jb21wcmVzc2VkX3ZpZGVvX2FkdmFuY2VkKGNoYXRfaWQsIGNvbXByZXNzZWRfdXJsLCBjYXB0aW9uKQogICAgICAgICAgICAgICAgCiAgICAgICAgICAgICAgICAjINit2LDZgSDYp9mE2YXZhNmBINin2YTZhdik2YLYqiDZgdmI2LHYp9mLINio2LnYryDYp9mE2KXYsdiz2KfZhAogICAgICAgICAgICAgICAgaWYgdGVtcF9maWxlOgogICAgICAgICAgICAgICAgICAgIGRlbGV0ZV9maWxlX3NhZmUodGVtcF9maWxlKQogICAgICAgICAgICAgICAgCiAgICAgICAgICAgICAgICBpZiBzZW5kX3N1Y2Nlc3M6CiAgICAgICAgICAgICAgICAgICAgaW5jcmVtZW50X3ZpZGVvX2NvdW50KHVzZXJfaWQpCiAgICAgICAgICAgICAgICAgICAgcHJpbnQoZiLinIUg2KrZhSDYpdix2LPYp9mEINin2YTZgdmK2K/ZitmIINil2YTZiSB7Y2hhdF9pZH0iKQogICAgICAgICAgICAgICAgICAgIAogICAgICAgICAgICAgICAgICAgICMg2KrZhti42YrZgSDYo9mKINmF2YTZgdin2Kog2YXYqtio2YLZitipCiAgICAgICAgICAgICAgICAgICAgYXdhaXQgYXN5bmNpby5zbGVlcCgyKQogICAgICAgICAgICAgICAgICAgIHN0b3JhZ2VfaW5mbyA9IGdldF9zdG9yYWdlX2luZm8oKQogICAgICAgICAgICAgICAgICAgIGlmIHN0b3JhZ2VfaW5mb1snZmlsZV9jb3VudCddID4gNToKICAgICAgICAgICAgICAgICAgICAgICAgcHJpbnQoIvCfp7kg2KrZhti42YrZgSDYp9mE2YXZhNmB2KfYqiDYp9mE2YLYr9mK2YXYqS4uLiIpCiAgICAgICAgICAgICAgICAgICAgICAgIGZvciBmaWxlX2luZm8gaW4gc3RvcmFnZV9pbmZvWydmaWxlcyddWzozXToKICAgICAgICAgICAgICAgICAgICAgICAgICAgIGRlbGV0ZV9maWxlX3NhZmUoZmlsZV9pbmZvWydwYXRoJ10pCiAgICAgICAgICAgICAgICBlbHNlOgogICAgICAgICAgICAgICAgICAgIGF3YWl0IHNlbmRfbWVzc2FnZShjaGF0X2lkLCAi4p2MINmB2LTZhCDYpdix2LPYp9mEINin2YTZgdmK2K/ZitmILiDYrdin2YjZhCDZhdix2Kkg2KPYrtix2YkuIiwgY29udGV4dCkKICAgICAgICAgICAgZWxzZToKICAgICAgICAgICAgICAgIGF3YWl0IHNlbmRfbWVzc2FnZShjaGF0X2lkLCAi4p2MINmB2LTZhCDYtti62Lcg2KfZhNmB2YrYr9mK2YguINiq2K3ZgtmCINmF2YYg2KfZhNil2LnYr9in2K/Yp9iqLiIsIGNvbnRleHQpCiAgICAgICAgICAgIAogICAgICAgICAgICAjINit2LDZgSDYo9mKINmF2YTZgdin2Kog2YXYrdmE2YrYqSDZhdiq2KjZgtmK2KkKICAgICAgICAgICAgaWYgbG9jYWxfZmlsZV90b19kZWxldGU6CiAgICAgICAgICAgICAgICBkZWxldGVfZmlsZV9zYWZlKGxvY2FsX2ZpbGVfdG9fZGVsZXRlKQogICAgICAgICAgICAKICAgICAgICAgICAgcHJvY2Vzc2luZ19xdWV1ZS50YXNrX2RvbmUoKQogICAgICAgICAgICBpc19wcm9jZXNzaW5nID0gRmFsc2UKICAgICAgICAgICAgCiAgICAgICAgZXhjZXB0IEV4Y2VwdGlvbiBhcyBlOgogICAgICAgICAgICBwcmludChmIuKdjCDYrti32KMg2YHZiiDYp9mE2YXYudin2YTYrNipOiB7ZX0iKQogICAgICAgICAgICBpc19wcm9jZXNzaW5nID0gRmFsc2UKICAgICAgICAgICAgYXdhaXQgYXN5bmNpby5zbGVlcCgxKQoKYXN5bmMgZGVmIGhhbmRsZV92aWRlbyh1cGRhdGU6IFVwZGF0ZSwgY29udGV4dDogQ29udGV4dFR5cGVzLkRFRkFVTFRfVFlQRSk6CiAgICAiIiLZhdi52KfZhNisINin2YTZgdmK2K/ZitmIIiIiCiAgICB1c2VyX2lkID0gdXBkYXRlLmVmZmVjdGl2ZV91c2VyLmlkCiAgICBjaGF0X2lkID0gc3RyKHVwZGF0ZS5lZmZlY3RpdmVfY2hhdC5pZCkKICAgIAogICAgaWYgdXBkYXRlLm1lc3NhZ2UudmlkZW86CiAgICAgICAgZmlsZV9pZCA9IHVwZGF0ZS5tZXNzYWdlLnZpZGVvLmZpbGVfaWQKICAgICAgICBmaWxlX3NpemUgPSB1cGRhdGUubWVzc2FnZS52aWRlby5maWxlX3NpemUKICAgIGVsaWYgdXBkYXRlLm1lc3NhZ2UuZG9jdW1lbnQgYW5kIHVwZGF0ZS5tZXNzYWdlLmRvY3VtZW50Lm1pbWVfdHlwZSBhbmQgdXBkYXRlLm1lc3NhZ2UuZG9jdW1lbnQubWltZV90eXBlLnN0YXJ0c3dpdGgoInZpZGVvLyIpOgogICAgICAgIGZpbGVfaWQgPSB1cGRhdGUubWVzc2FnZS5kb2N1bWVudC5maWxlX2lkCiAgICAgICAgZmlsZV9zaXplID0gdXBkYXRlLm1lc3NhZ2UuZG9jdW1lbnQuZmlsZV9zaXplCiAgICBlbHNlOgogICAgICAgIHJldHVybgogICAgCiAgICBmaWxlX3NpemVfbWIgPSBmaWxlX3NpemUgLyAoMTAyNCAqIDEwMjQpCiAgICBwcmludChmIvCfk7kg2YHZitiv2YrZiCDZhdmGIHt1c2VyX2lkfSAtIHtmaWxlX3NpemVfbWI6LjJmfSBNQiIpCiAgICAKICAgIGlmIGZpbGVfc2l6ZSA+IE1BWF9GSUxFX1NJWkU6CiAgICAgICAgYXdhaXQgdXBkYXRlLm1lc3NhZ2UucmVwbHlfdGV4dChmIuKdjCDYp9mE2YXZhNmBINmD2KjZitixINis2K/Yp9mLICh7ZmlsZV9zaXplX21iOi4yZn0gTUIpXG5cbvCfk48g2KfZhNit2K8g2KfZhNij2YLYtdmJOiAxMDBNQlxu8J+SoSDYp9iz2KrYrtiv2YUg2LHYp9io2Lcg2K7Yp9ix2KzZiiDZhNmE2YXZhNmB2KfYqiDYp9mE2KPZg9io2LEuIikKICAgICAgICByZXR1cm4KICAgIAogICAgY29udGV4dC51c2VyX2RhdGFbJ3BlbmRpbmdfdmlkZW8nXSA9IHsKICAgICAgICAnZmlsZV9pZCc6IGZpbGVfaWQsCiAgICAgICAgJ2ZpbGVfc2l6ZSc6IGZpbGVfc2l6ZSwKICAgICAgICAnY2hhdF9pZCc6IGNoYXRfaWQKICAgIH0KICAgIAogICAga2V5Ym9hcmQgPSBbCiAgICAgICAgW0lubGluZUtleWJvYXJkQnV0dG9uKCLwn5SlINi52KfZhNmK2KkgKDEwODBwKSIsIGNhbGxiYWNrX2RhdGE9InF1YWxpdHlfaGlnaCIpXSwKICAgICAgICBbSW5saW5lS2V5Ym9hcmRCdXR0b24oIuKalu+4jyDZhdiq2YjYs9i32KkgKDcyMHApIiwgY2FsbGJhY2tfZGF0YT0icXVhbGl0eV9tZWRpdW0iKV0sCiAgICAgICAgW0lubGluZUtleWJvYXJkQnV0dG9uKCLwn5K+INmF2YbYrtmB2LbYqSAoNDgwcCkiLCBjYWxsYmFja19kYXRhPSJxdWFsaXR5X2xvdyIpXQogICAgXQogICAgcmVwbHlfbWFya3VwID0gSW5saW5lS2V5Ym9hcmRNYXJrdXAoa2V5Ym9hcmQpCiAgICAKICAgIHF1YWxpdHlfdGV4dCA9IGYiIiIK8J+OrCAqKtin2K7YqtixINis2YjYr9ipINin2YTYtti62Lc6KioKCvCfk7kg2K3YrNmFINin2YTZgdmK2K/ZitmIOiB7ZmlsZV9zaXplX21iOi4yZn0gTUIKCtin2K7YqtixINin2YTYrNmI2K/YqSDYp9mE2YXZhtin2LPYqNipIPCfkYcKIiIiCiAgICAKICAgIGF3YWl0IHVwZGF0ZS5tZXNzYWdlLnJlcGx5X3RleHQocXVhbGl0eV90ZXh0LCByZXBseV9tYXJrdXA9cmVwbHlfbWFya3VwKQoKYXN5bmMgZGVmIGhhbmRsZV91cmwodXBkYXRlOiBVcGRhdGUsIGNvbnRleHQ6IENvbnRleHRUeXBlcy5ERUZBVUxUX1RZUEUpOgogICAgIiIi2YXYudin2YTYrCDYp9mE2LHZiNin2KjYtyIiIgogICAgdXNlcl9pZCA9IHVwZGF0ZS5lZmZlY3RpdmVfdXNlci5pZAogICAgY2hhdF9pZCA9IHN0cih1cGRhdGUuZWZmZWN0aXZlX2NoYXQuaWQpCiAgICB1cmwgPSB1cGRhdGUubWVzc2FnZS50ZXh0LnN0cmlwKCkKICAgIAogICAgaWYgbm90IHVybC5zdGFydHN3aXRoKCgnaHR0cDovLycsICdodHRwczovLycpKToKICAgICAgICByZXR1cm4KICAgIAogICAgdmlkZW9fc2l0ZXMgPSBbJy5tcDQnLCAnLmF2aScsICcubW92JywgJ2RyaXZlLmdvb2dsZS5jb20nLCAnZHJvcGJveC5jb20nLCAnbWVnYS5ueiddCiAgICBpc19saWtlbHlfdmlkZW8gPSBhbnkoc2l0ZSBpbiB1cmwubG93ZXIoKSBmb3Igc2l0ZSBpbiB2aWRlb19zaXRlcykKICAgIAogICAgaWYgbm90IGlzX2xpa2VseV92aWRlbzoKICAgICAgICByZXR1cm4KICAgIAogICAgcHJpbnQoZiLwn5SXINix2KfYqNi3INmF2YYge3VzZXJfaWR9OiB7dXJsfSIpCiAgICAKICAgIGNvbnRleHQudXNlcl9kYXRhWydwZW5kaW5nX3ZpZGVvJ10gPSB7CiAgICAgICAgJ3VybCc6IHVybCwKICAgICAgICAnY2hhdF9pZCc6IGNoYXRfaWQKICAgIH0KICAgIAogICAga2V5Ym9hcmQgPSBbCiAgICAgICAgW0lubGluZUtleWJvYXJkQnV0dG9uKCLwn5SlINi52KfZhNmK2KkgKDEwODBwKSIsIGNhbGxiYWNrX2RhdGE9InF1YWxpdHlfdXJsX2hpZ2giKV0sCiAgICAgICAgW0lubGluZUtleWJvYXJkQnV0dG9uKCLimpbvuI8g2YXYqtmI2LPYt9ipICg3MjBwKSIsIGNhbGxiYWNrX2RhdGE9InF1YWxpdHlfdXJsX21lZGl1bSIpXSwKICAgICAgICBbSW5saW5lS2V5Ym9hcmRCdXR0b24oIvCfkr4g2YXZhtiu2YHYttipICg0ODBwKSIsIGNhbGxiYWNrX2RhdGE9InF1YWxpdHlfdXJsX2xvdyIpXQogICAgXQogICAgcmVwbHlfbWFya3VwID0gSW5saW5lS2V5Ym9hcmRNYXJrdXAoa2V5Ym9hcmQpCiAgICAKICAgIGF3YWl0IHVwZGF0ZS5tZXNzYWdlLnJlcGx5X3RleHQoIvCfjqwgKirYp9iu2KrYsSDYrNmI2K/YqSDYp9mE2LbYuti3OioqIiwgcmVwbHlfbWFya3VwPXJlcGx5X21hcmt1cCkKCiMgPT09PT09PT09PT09PT09PT09PT0g2KfZhNio2LHZhtin2YXYrCDYp9mE2LHYptmK2LPZiiA9PT09PT09PT09PT09PT09PT09PQpkZWYgbWFpbigpOgogICAgIiIi2KfZhNio2LHZhtin2YXYrCDYp9mE2LHYptmK2LPZiiIiIgogICAgcHJpbnQoIvCfmoAg2KrZh9mK2KbYqSDYp9mE2KjZiNiqLi4uIikKICAgIAogICAgIyDYpdmG2LTYp9ihINin2YTZhdis2YTYr9in2Kog2YjYp9mE2YLZiNin2LnYrwogICAgaW5pdF90ZW1wX3N0b3JhZ2UoKQogICAgaW5pdF9kYXRhYmFzZSgpCiAgICAKICAgICMg2KrZhti42YrZgSDYp9mE2YXZhNmB2KfYqiDYp9mE2YLYr9mK2YXYqQogICAgY2xlYW51cF9vbGRfZmlsZXMoKQogICAgCiAgICBwcmludCgi4pyFINin2YTZhti42KfZhSDYrNin2YfYsiIpCiAgICAKICAgICMg2KXZhti02KfYoSDYp9mE2KrYt9io2YrZggogICAgYXBwbGljYXRpb24gPSBBcHBsaWNhdGlvbi5idWlsZGVyKCkudG9rZW4oVEVMRUdSQU1fQk9UX1RPS0VOKS5idWlsZCgpCiAgICAKICAgICMg2KfZhNmF2LnYp9mE2KzYp9iqCiAgICBhcHBsaWNhdGlvbi5hZGRfaGFuZGxlcihDb21tYW5kSGFuZGxlcigic3RhcnQiLCBzdGFydF9jb21tYW5kKSkKICAgIGFwcGxpY2F0aW9uLmFkZF9oYW5kbGVyKENvbW1hbmRIYW5kbGVyKCJhY2NvdW50IiwgbXlfYWNjb3VudF9jb21tYW5kKSkKICAgIGFwcGxpY2F0aW9uLmFkZF9oYW5kbGVyKENvbW1hbmRIYW5kbGVyKCJzZXRhcGlrZXkiLCBzZXRhcGlrZXlfY29tbWFuZCkpCiAgICBhcHBsaWNhdGlvbi5hZGRfaGFuZGxlcihDb21tYW5kSGFuZGxlcigic3RhdHMiLCBzdGF0c19jb21tYW5kKSkKICAgIGFwcGxpY2F0aW9uLmFkZF9oYW5kbGVyKENvbW1hbmRIYW5kbGVyKCJmaWxlcyIsIGZpbGVzX2NvbW1hbmQpKQogICAgYXBwbGljYXRpb24uYWRkX2hhbmRsZXIoQ29tbWFuZEhhbmRsZXIoImNsZWFudXAiLCBjbGVhbnVwX2NvbW1hbmQpKQogICAgYXBwbGljYXRpb24uYWRkX2hhbmRsZXIoQ2FsbGJhY2tRdWVyeUhhbmRsZXIoYnV0dG9uX2hhbmRsZXIpKQogICAgYXBwbGljYXRpb24uYWRkX2hhbmRsZXIoTWVzc2FnZUhhbmRsZXIoZmlsdGVycy5WSURFTyB8IGZpbHRlcnMuRG9jdW1lbnQuVklERU8sIGhhbmRsZV92aWRlbykpCiAgICBhcHBsaWNhdGlvbi5hZGRfaGFuZGxlcihNZXNzYWdlSGFuZGxlcihmaWx0ZXJzLlRFWFQgJiB+ZmlsdGVycy5DT01NQU5ELCBoYW5kbGVfdXJsKSkKICAgIAogICAgIyDYqNiv2KEg2YXYudin2YTYrCDYp9mE2LfYp9io2YjYsQogICAgYXBwbGljYXRpb24uam9iX3F1ZXVlLnJ1bl9vbmNlKAogICAgICAgIGxhbWJkYSBjb250ZXh0OiBhc3luY2lvLmNyZWF0ZV90YXNrKHByb2Nlc3NfdmlkZW9fcXVldWUoY29udGV4dCkpLAogICAgICAgIHdoZW49MAogICAgKQogICAgCiAgICBwcmludCgi4pyFINin2YTYqNmI2Kog2YrYudmF2YQg2KfZhNii2YYuLi4iKQogICAgcHJpbnQoZiLwn5GRINmF2LnYsdmBINin2YTZhdi02LHZgToge0FETUlOX0lEfSIpCiAgICBwcmludChmIvCfk6Yg2KfZhNit2K8g2KfZhNij2YLYtdmJINmE2YTZhdmE2YHYp9iqOiB7TUFYX0ZJTEVfU0laRS8oMTAyNCoxMDI0KTouMGZ9IE1CIikKICAgIAogICAgIyDYqti02LrZitmEINin2YTYqNmI2KoKICAgICMg2KrZhSDYqti52K/ZitmE2Ycg2YTZhNi52YXZhCDZgdmKIHRocmVhZAoKICAgIGltcG9ydCBhc3luY2lvCgogICAgbG9vcCA9IGFzeW5jaW8ubmV3X2V2ZW50X2xvb3AoKQoKICAgIGFzeW5jaW8uc2V0X2V2ZW50X2xvb3AobG9vcCkKCiAgICBhc3luYyBkZWYgcnVuKCk6CgogICAgICAgIGF3YWl0IGFwcGxpY2F0aW9uLmluaXRpYWxpemUoKQoKICAgICAgICBhd2FpdCBhcHBsaWNhdGlvbi5zdGFydCgpCgogICAgICAgIGF3YWl0IGFwcGxpY2F0aW9uLnVwZGF0ZXIuc3RhcnRfcG9sbGluZygpCgogICAgICAgIHRyeToKCiAgICAgICAgICAgIHdoaWxlIFRydWU6CgogICAgICAgICAgICAgICAgYXdhaXQgYXN5bmNpby5zbGVlcCgxKQoKICAgICAgICBleGNlcHQ6CgogICAgICAgICAgICBwYXNzCgogICAgICAgIGZpbmFsbHk6CgogICAgICAgICAgICBhd2FpdCBhcHBsaWNhdGlvbi51cGRhdGVyLnN0b3AoKQoKICAgICAgICAgICAgYXdhaXQgYXBwbGljYXRpb24uc3RvcCgpCgogICAgICAgICAgICBhd2FpdCBhcHBsaWNhdGlvbi5zaHV0ZG93bigpCgogICAgbG9vcC5ydW5fdW50aWxfY29tcGxldGUocnVuKCkpCgppZiBfX25hbWVfXyA9PSAnX19tYWluX18nOgogICAgbWFpbigp",
+}
 
-def increment_video_count(user_id):
-    """زيادة عداد الفيديوهات"""
-    conn = sqlite3.connect('video_bot.db')
-    c = conn.cursor()
-    c.execute('UPDATE users SET total_videos = total_videos + 1 WHERE user_id = ?', (user_id,))
-    conn.commit()
-    conn.close()
+# أسماء البوتات
+BOTS_NAMES = {
+    1: "1.py",
+}
 
-# ==================== دوال تليجرام ====================
-async def send_message(chat_id: str, text: str, context=None):
-    """إرسال رسالة نصية"""
-    try:
-        if context:
-            await context.bot.send_message(chat_id=chat_id, text=text, parse_mode='Markdown')
-        else:
-            url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-            requests.post(url, data={"chat_id": chat_id, "text": text, "parse_mode": 'Markdown'})
-    except Exception as e:
-        print(f"خطأ في إرسال الرسالة: {e}")
+# تبعيات كل بوت
+BOTS_IMPORTS = {
+}
 
-# ==================== أوامر البوت ====================
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """أمر /start"""
-    user = update.effective_user
-    create_user(user.id, user.username)
-    
-    keyboard_rows = [
-        [InlineKeyboardButton("📊 حسابي وإحصائياتي", callback_data="my_account")],
-        [InlineKeyboardButton("ℹ️ المساعدة", callback_data="help")]
-    ]
-    
-    if user.id == ADMIN_ID:
-        keyboard_rows.append([InlineKeyboardButton("⚙️ إعدادات المشرف", callback_data="admin_settings")])
-
-    reply_markup = InlineKeyboardMarkup(keyboard_rows)
-    
-    welcome_text = f"""
-🎬 مرحباً {user.first_name}!
-
-أنا بوت ضغط الفيديوهات. الآن أنا **مجاني بالكامل وبدون قيود**! 🚀
-
-**🎯 المميزات:**
-✨ معالجة ملفات حتى 100MB مباشرة
-✨ دعم ملفات تيليجرام والروابط الخارجية
-✨ 3 مستويات جودة (1080p / 720p / 480p)
-✨ حذف تلقائي للملفات بعد الإرسال
-
-📤 أرسل فيديو (حتى 100MB) أو رابط فيديو وسأقوم بضغطه!
-"""
-    
-    await update.message.reply_text(welcome_text, reply_markup=reply_markup)
-
-async def my_account_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """معلومات الحساب"""
-    user_id = update.effective_user.id
-    user_data = get_user(user_id)
-    
-    if not user_data:
-        await update.message.reply_text("يرجى البدء بالأمر /start أولاً")
+def load_helper_files(bot_num):
+    """تحميل الملفات المساعدة التي يحتاجها البوت"""
+    if bot_num not in BOTS_IMPORTS:
         return
     
-    user_id_db, username, total_videos, joined = user_data
-    
-    account_text = f"""
-👤 **معلومات حسابك**
-
-📝 معرف المستخدم: `{user_id}`
-🎬 إجمالي الفيديوهات المعالجة: {total_videos}
-📅 تاريخ الانضمام: {joined.split()[0]}
-"""
-    
-    await update.message.reply_text(account_text, parse_mode='Markdown')
-
-async def setapikey_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """أمر المشرف لتغيير مفتاح API"""
-    user_id = update.effective_user.id
-    if user_id != ADMIN_ID:
-        await update.message.reply_text("❌ هذا الأمر متاح للمشرف فقط.")
-        return
-
-    args = context.args
-    if args:
-        new_key = args[0]
-        set_api_key(new_key)
-        await update.message.reply_text(f"✅ تم تحديث مفتاح CloudConvert API بنجاح.", parse_mode='Markdown')
-    else:
-        current_key = get_api_key()
-        if current_key:
-            masked_key = '*' * 4 + current_key[-4:] if len(current_key) > 4 else current_key
-            await update.message.reply_text(f"🔑 مفتاح API الحالي ينتهي بـ: `{masked_key}`\n\n**لتغيير المفتاح:**\n`/setapikey YOUR_NEW_KEY`", parse_mode='Markdown')
-        else:
-            await update.message.reply_text("❌ لم يتم تعيين مفتاح API")
-
-async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """إحصائيات البوت"""
-    user_id = update.effective_user.id
-    if user_id != ADMIN_ID:
-        await update.message.reply_text("❌ هذا الأمر متاح للمشرف فقط.")
-        return
-
-    conn = sqlite3.connect('video_bot.db')
-    c = conn.cursor()
-    
-    c.execute('SELECT COUNT(*) FROM users')
-    total_users = c.fetchone()[0]
-    
-    c.execute('SELECT SUM(total_videos) FROM users')
-    total_videos_processed = c.fetchone()[0] or 0
-    
-    conn.close()
-    
-    storage_info = get_storage_info()
-    
-    stats_text = f"""
-📊 **إحصائيات البوت**
-
-👤 إجمالي المستخدمين: {total_users}
-🎬 إجمالي الفيديوهات المعالجة: {total_videos_processed}
-
-💾 **التخزين المؤقت:**
-📁 عدد الملفات: {storage_info['file_count']}
-📦 المساحة المستخدمة: {format_size(storage_info['total_size'])}
-"""
-    
-    await update.message.reply_text(stats_text)
-
-async def files_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """عرض الملفات المؤقتة (للمشرف فقط)"""
-    user_id = update.effective_user.id
-    if user_id != ADMIN_ID:
-        await update.message.reply_text("❌ هذا الأمر متاح للمشرف فقط.")
-        return
-    
-    storage_info = get_storage_info()
-    
-    if storage_info['file_count'] == 0:
-        await update.message.reply_text("✅ لا توجد ملفات مؤقتة. المجلد نظيف! 🧹")
-        return
-    
-    files_text = f"📁 **الملفات المؤقتة ({storage_info['file_count']}):**\n"
-    files_text += f"📦 المساحة الإجمالية: {format_size(storage_info['total_size'])}\n\n"
-    
-    keyboard = []
-    for idx, file_info in enumerate(storage_info['files'][:20]):  # عرض أول 20 ملف
-        file_name = file_info['name']
-        file_size = format_size(file_info['size'])
-        files_text += f"{idx+1}. `{file_name}` - {file_size}\n"
-        
-        # إضافة زر حذف لكل ملف
-        keyboard.append([InlineKeyboardButton(
-            f"🗑️ حذف {file_name[:20]}...",
-            callback_data=f"delete_file_{file_name}"
-        )])
-    
-    # زر حذف الكل
-    keyboard.append([InlineKeyboardButton("🗑️ حذف جميع الملفات", callback_data="delete_all_files")])
-    keyboard.append([InlineKeyboardButton("عودة", callback_data="admin_settings")])
-    
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text(files_text, reply_markup=reply_markup, parse_mode='Markdown')
-
-async def cleanup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """حذف جميع الملفات المؤقتة (للمشرف)"""
-    user_id = update.effective_user.id
-    if user_id != ADMIN_ID:
-        await update.message.reply_text("❌ هذا الأمر متاح للمشرف فقط.")
-        return
-    
-    storage_info = get_storage_info()
-    deleted_count = 0
-    
-    for file_info in storage_info['files']:
-        if delete_file_safe(file_info['path']):
-            deleted_count += 1
-    
-    await update.message.reply_text(f"✅ تم حذف {deleted_count} ملف من المجلد المؤقت! 🧹")
-
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """معالج الأزرار"""
-    query = update.callback_query
-    await query.answer()
-    
-    # حذف ملف محدد
-    if query.data.startswith("delete_file_"):
-        if query.from_user.id != ADMIN_ID:
-            await query.edit_message_text("❌ هذه الوظيفة للمشرف فقط.")
-            return
-        
-        file_name = query.data.replace("delete_file_", "")
-        file_path = os.path.join(TEMP_STORAGE_DIR, file_name)
-        
-        if delete_file_safe(file_path):
-            await query.edit_message_text(f"✅ تم حذف الملف: {file_name}")
-        else:
-            await query.edit_message_text(f"❌ فشل حذف الملف: {file_name}")
-        return
-    
-    # حذف جميع الملفات
-    if query.data == "delete_all_files":
-        if query.from_user.id != ADMIN_ID:
-            await query.edit_message_text("❌ هذه الوظيفة للمشرف فقط.")
-            return
-        
-        storage_info = get_storage_info()
-        deleted_count = 0
-        
-        for file_info in storage_info['files']:
-            if delete_file_safe(file_info['path']):
-                deleted_count += 1
-        
-        await query.edit_message_text(f"✅ تم حذف {deleted_count} ملف! 🧹")
-        return
-    
-    # معالجة اختيار الجودة للفيديوهات المرسلة كملف
-    if query.data.startswith("quality_") and not query.data.startswith("quality_url_"):
-        quality = query.data.replace("quality_", "")
-        
-        if 'pending_video' not in context.user_data:
-            await query.edit_message_text("❌ لم يتم العثور على فيديو.")
-            return
-        
-        video_info = context.user_data['pending_video']
-        chat_id = video_info['chat_id']
-        file_id = video_info['file_id']
-        file_size = video_info['file_size']
-        
-        del context.user_data['pending_video']
-        
-        quality_names = {
-            'high': '🔥 عالية (1080p)',
-            'medium': '⚖️ متوسطة (720p)',
-            'low': '💾 منخفضة (480p)'
-        }
-        
-        queue_size = processing_queue.qsize()
-        status_text = f"✅ تم اختيار الجودة: {quality_names.get(quality, 'عادية')}\n\n"
-        if queue_size > 0:
-            status_text += f"⏳ يوجد {queue_size} فيديو في الطابور..."
-        else:
-            status_text += f"⏳ جاري معالجة الفيديو..."
-            
-        await query.edit_message_text(status_text)
-        
-        await processing_queue.put({
-            'chat_id': chat_id,
-            'source': file_id,
-            'type': 'file_id',
-            'file_size': file_size,
-            'quality': quality
-        })
-        return
-    
-    # معالجة اختيار جودة الروابط
-    if query.data.startswith("quality_url_"):
-        quality = query.data.replace("quality_url_", "")
-        
-        if 'pending_video' not in context.user_data or 'url' not in context.user_data['pending_video']:
-            await query.edit_message_text("❌ لم يتم العثور على رابط.")
-            return
-        
-        video_info = context.user_data['pending_video']
-        chat_id = video_info['chat_id']
-        url = video_info['url']
-        
-        del context.user_data['pending_video']
-        
-        quality_names = {
-            'high': '🔥 عالية (1080p)',
-            'medium': '⚖️ متوسطة (720p)',
-            'low': '💾 منخفضة (480p)'
-        }
-        
-        queue_size = processing_queue.qsize()
-        status_text = f"✅ تم اختيار الجودة: {quality_names.get(quality, 'عادية')}\n\n"
-        if queue_size > 0:
-            status_text += f"⏳ يوجد {queue_size} فيديو في الطابور..."
-        else:
-            status_text += f"⏳ جاري معالجة الرابط..."
-
-        await query.edit_message_text(status_text)
-        
-        await processing_queue.put({
-            'chat_id': chat_id,
-            'source': url,
-            'type': 'url',
-            'file_size': 0,
-            'quality': quality
-        })
-        return
-    
-    if query.data == "my_account":
-        user_id = query.from_user.id
-        user_data = get_user(user_id)
-        
-        if not user_data:
-            await query.edit_message_text("يرجى البدء بالأمر /start أولاً")
-            return
-        
-        user_id_db, username, total_videos, joined = user_data
-        
-        account_text = f"""
-👤 **معلومات حسابك**
-
-📝 معرف المستخدم: `{user_id}`
-🎬 إجمالي الفيديوهات المعالجة: {total_videos}
-📅 تاريخ الانضمام: {joined.split()[0]}
-"""
-        keyboard_rows = [[InlineKeyboardButton("عودة", callback_data="start_menu")]]
-        if query.from_user.id == ADMIN_ID:
-             keyboard_rows.insert(0, [InlineKeyboardButton("⚙️ إعدادات المشرف", callback_data="admin_settings")])
-        
-        reply_markup = InlineKeyboardMarkup(keyboard_rows)
-        await query.edit_message_text(account_text, reply_markup=reply_markup, parse_mode='Markdown')
-    
-    elif query.data == "help":
-        help_text = """
-ℹ️ **كيفية الاستخدام:**
-
-**1. ملفات تيليجرام (حتى 100MB):**
-1️⃣ أرسل فيديو مباشرة للبوت
-2️⃣ اختر جودة الضغط
-3️⃣ انتظر حتى يتم الضغط والإرسال
-
-**2. الروابط الخارجية:**
-1️⃣ أرسل رابط مباشر للفيديو
-2️⃣ اختر جودة الضغط
-3️⃣ انتظر المعالجة
-
-🎬 **مستويات الجودة:**
-🔥 عالية: 1080p - أفضل جودة
-⚖️ متوسطة: 720p - توازن مثالي
-💾 منخفضة: 480p - أقل حجم
-
-🗑️ **ملاحظة:** يتم حذف جميع الملفات تلقائياً بعد الإرسال لتوفير المساحة.
-"""
-        await query.edit_message_text(help_text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("عودة", callback_data="start_menu")]]))
-    
-    elif query.data == "admin_settings" and query.from_user.id == ADMIN_ID:
-        storage_info = get_storage_info()
-        admin_text = f"""
-👑 **لوحة تحكم المشرف**
-
-💾 **التخزين المؤقت:**
-📁 عدد الملفات: {storage_info['file_count']}
-📦 المساحة: {format_size(storage_info['total_size'])}
-
-يمكنك إدارة الملفات والإعدادات من هنا.
-"""
-        keyboard = [
-            [InlineKeyboardButton("📁 عرض الملفات المؤقتة", callback_data="admin_view_files")],
-            [InlineKeyboardButton("🔑 إعدادات API", callback_data="admin_set_api_key")],
-            [InlineKeyboardButton("📊 الإحصائيات", callback_data="admin_stats")],
-            [InlineKeyboardButton("عودة", callback_data="start_menu")]
-        ]
-        await query.edit_message_text(admin_text, reply_markup=InlineKeyboardMarkup(keyboard))
-    
-    elif query.data == "admin_view_files" and query.from_user.id == ADMIN_ID:
-        storage_info = get_storage_info()
-        
-        if storage_info['file_count'] == 0:
-            await query.edit_message_text(
-                "✅ لا توجد ملفات مؤقتة. المجلد نظيف! 🧹",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("عودة", callback_data="admin_settings")]])
-            )
-            return
-        
-        files_text = f"📁 **الملفات المؤقتة ({storage_info['file_count']}):**\n"
-        files_text += f"📦 المساحة: {format_size(storage_info['total_size'])}\n\n"
-        
-        keyboard = []
-        for idx, file_info in enumerate(storage_info['files'][:10]):
-            file_name = file_info['name']
-            file_size = format_size(file_info['size'])
-            files_text += f"{idx+1}. `{file_name[:30]}...` - {file_size}\n"
-            
-            keyboard.append([InlineKeyboardButton(
-                f"🗑️ {file_name[:25]}...",
-                callback_data=f"delete_file_{file_name}"
-            )])
-        
-        keyboard.append([InlineKeyboardButton("🗑️ حذف الكل", callback_data="delete_all_files")])
-        keyboard.append([InlineKeyboardButton("عودة", callback_data="admin_settings")])
-        
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.edit_message_text(files_text, reply_markup=reply_markup, parse_mode='Markdown')
-        
-    elif query.data == "admin_set_api_key" and query.from_user.id == ADMIN_ID:
-        current_key = get_api_key()
-        if current_key:
-            masked_key = '*' * 4 + current_key[-4:] if len(current_key) > 4 else current_key
-            response_text = f"🔑 مفتاح CloudConvert API الحالي ينتهي بـ:\n`{masked_key}`\n\n**لتغيير المفتاح:**\n`/setapikey YOUR_NEW_KEY`"
-        else:
-            response_text = "❌ لم يتم تعيين مفتاح API\n\n**لتعيين المفتاح:**\n`/setapikey YOUR_NEW_KEY`"
-            
-        keyboard = [[InlineKeyboardButton("عودة", callback_data="admin_settings")]]
-        await query.edit_message_text(response_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
-
-    elif query.data == "admin_stats" and query.from_user.id == ADMIN_ID:
-        conn = sqlite3.connect('video_bot.db')
-        c = conn.cursor()
-        c.execute('SELECT COUNT(*) FROM users')
-        total_users = c.fetchone()[0]
-        c.execute('SELECT SUM(total_videos) FROM users')
-        total_videos_processed = c.fetchone()[0] or 0
-        conn.close()
-        
-        storage_info = get_storage_info()
-        
-        stats_text = f"""
-📊 **إحصائيات البوت**
-
-👤 إجمالي المستخدمين: {total_users}
-🎬 إجمالي الفيديوهات: {total_videos_processed}
-
-💾 **التخزين:**
-📁 الملفات المؤقتة: {storage_info['file_count']}
-📦 المساحة المستخدمة: {format_size(storage_info['total_size'])}
-"""
-        keyboard = [[InlineKeyboardButton("عودة", callback_data="admin_settings")]]
-        await query.edit_message_text(stats_text, reply_markup=InlineKeyboardMarkup(keyboard))
-
-    elif query.data == "start_menu":
-        user = query.from_user
-        keyboard_rows = [
-            [InlineKeyboardButton("📊 حسابي وإحصائياتي", callback_data="my_account")],
-            [InlineKeyboardButton("ℹ️ المساعدة", callback_data="help")]
-        ]
-        
-        if user.id == ADMIN_ID:
-            keyboard_rows.append([InlineKeyboardButton("⚙️ إعدادات المشرف", callback_data="admin_settings")])
-
-        reply_markup = InlineKeyboardMarkup(keyboard_rows)
-        
-        welcome_text = f"""
-🎬 مرحباً {user.first_name}!
-
-أنا بوت ضغط الفيديوهات - **مجاني بالكامل** 🚀
-
-**🎯 المميزات:**
-✨ معالجة ملفات حتى 100MB
-✨ دعم الروابط الخارجية
-✨ 3 مستويات جودة
-✨ حذف تلقائي للملفات
-
-📤 أرسل فيديو أو رابط للبدء!
-"""
-        await query.edit_message_text(welcome_text, reply_markup=reply_markup)
-
-# ==================== معالجة الفيديو ====================
-async def download_file_from_telegram(context, file_id: str, file_size: int) -> Optional[str]:
-    """تحميل ملف من تليجرام إلى التخزين المؤقت"""
-    try:
-        print(f"📥 تحميل من Telegram... الحجم: {file_size / (1024*1024):.2f} MB")
-        
-        file = await context.bot.get_file(file_id)
-        
-        # حفظ في مجلد التخزين المؤقت
-        timestamp = int(time.time())
-        temp_filename = f"video_{timestamp}_{file_id[:10]}.mp4"
-        temp_path = os.path.join(TEMP_STORAGE_DIR, temp_filename)
-        
-        await file.download_to_drive(temp_path)
-        print(f"✅ تم التحميل: {temp_path}")
-        
-        return temp_path
-        
-    except Exception as e:
-        print(f"❌ خطأ في التحميل: {e}")
-        return None
-
-def get_quality_settings(quality: str) -> dict:
-    """الحصول على إعدادات الجودة"""
-    if quality == 'high':
-        return {
-            "crf": 23,
-            "preset": "medium",
-            "width": 1920,
-            "height": 1080,
-            "audio_bitrate": 128,
-            "audio_frequency": 44100,
-            "audio_channels": 2,
-            "fps": 30
-        }
-    elif quality == 'medium':
-        return {
-            "crf": 28,
-            "preset": "slow",
-            "width": 1280,
-            "height": 720,
-            "audio_bitrate": 96,
-            "audio_frequency": 44100,
-            "audio_channels": 2,
-            "fps": 30
-        }
-    else:  # low
-        return {
-            "crf": 40,
-            "preset": "veryslow",
-            "width": 854,
-            "height": 480,
-            "audio_bitrate": 48,
-            "audio_frequency": 22050,
-            "audio_channels": 1,
-            "fps": 24
-        }
-
-def compress_video(video_source: str, chat_id: str, context, quality: str = 'low', is_url: bool = True) -> Optional[str]:
-    """ضغط الفيديو باستخدام CloudConvert"""
-    api_key = get_api_key()
-    if not api_key:
-        return "NO_API_KEY_SET"
-
-    try:
-        headers = {"Authorization": f"Bearer {api_key}"}
-        settings = get_quality_settings(quality)
-        
-        # تحديد حمولة Job
-        if is_url:
-            job_payload = {
-                "tasks": {
-                    "import-video": {"operation": "import/url", "url": video_source, "filename": "video.mp4"},
-                    "compress-video": {
-                        "operation": "convert", "input": "import-video", "output_format": "mp4",
-                        "video_codec": "x264", "crf": settings["crf"], "preset": settings["preset"],
-                        "width": settings["width"], "height": settings["height"],
-                        "audio_codec": "aac", "audio_bitrate": settings["audio_bitrate"], 
-                        "audio_frequency": settings["audio_frequency"], "audio_channels": settings["audio_channels"], 
-                        "strip_metadata": True, "fps": settings["fps"]
-                    },
-                    "export-video": {"operation": "export/url", "input": "compress-video"}
-                }
-            }
-        else:
-            job_payload = {
-                "tasks": {
-                    "import-video": {"operation": "import/upload"},
-                    "compress-video": {
-                        "operation": "convert", "input": "import-video", "output_format": "mp4",
-                        "video_codec": "x264", "crf": settings["crf"], "preset": settings["preset"],
-                        "width": settings["width"], "height": settings["height"],
-                        "audio_codec": "aac", "audio_bitrate": settings["audio_bitrate"], 
-                        "audio_frequency": settings["audio_frequency"], "audio_channels": settings["audio_channels"], 
-                        "strip_metadata": True, "fps": settings["fps"]
-                    },
-                    "export-video": {"operation": "export/url", "input": "compress-video"}
-                }
-            }
-        
-        response = requests.post(
-            "https://api.cloudconvert.com/v2/jobs",
-            json=job_payload,
-            headers=headers
-        )
-        
-        if response.status_code != 201:
-            print(f"❌ فشل إنشاء Job: {response.text}")
-            return None
-            
-        job_data = response.json()["data"]
-        job_id = job_data["id"]
-        
-        # رفع الملف إذا كان محلياً
-        if not is_url:
-            import_task = next((t for t in job_data["tasks"] if t["name"] == "import-video"), None)
-            if not import_task:
-                return None
-            
-            upload_url = import_task["result"]["form"]["url"]
-            upload_params = import_task["result"]["form"]["parameters"]
-            
-            with open(video_source, 'rb') as f:
-                files = {'file': f}
-                upload_response = requests.post(upload_url, data=upload_params, files=files)
-            
-            if upload_response.status_code not in [200, 201]:
-                print(f"❌ فشل رفع الملف: {upload_response.text}")
-                return None
-            
-            print("✅ تم رفع الملف لـ CloudConvert")
-            
-            # حذف الملف المحلي فوراً بعد الرفع
-            delete_file_safe(video_source)
-        
-        # انتظار اكتمال المعالجة
-        max_attempts = 180
-        attempt = 0
-        
-        while attempt < max_attempts:
-            job_status = requests.get(
-                f"https://api.cloudconvert.com/v2/jobs/{job_id}",
-                headers=headers
-            ).json()
-            
-            status = job_status["data"]["status"]
-            
-            if status == "finished":
-                tasks = job_status["data"]["tasks"]
-                export_task = next((t for t in tasks if t["name"] == "export-video"), None)
-                
-                if export_task and export_task.get("result") and export_task["result"].get("files"):
-                    download_url = export_task["result"]["files"][0]["url"]
-                    file_size = export_task["result"]["files"][0].get("size", 0)
-                    file_size_mb = file_size / (1024*1024)
-                    print(f"✅ اكتمل الضغط! الحجم: {file_size_mb:.2f} MB")
-                    return download_url
-                    
-            elif status == "error":
-                print(f"❌ خطأ في المعالجة: {job_status}")
-                return None
-                
-            time.sleep(5)
-            attempt += 1
-        
-        print("❌ انتهى الوقت")
-        return None
-        
-    except Exception as e:
-        print(f"❌ خطأ: {e}")
-        return None
-
-def send_compressed_video_advanced(chat_id: str, video_url: str, caption: str = "✅ تم ضغط الفيديو!") -> tuple:
-    """إرسال الفيديو المضغوط مع حذف تلقائي"""
-    temp_file_path = None
-    max_retries = 3
-    
-    for attempt in range(max_retries):
-        try:
-            print(f"📤 محاولة الإرسال ({attempt + 1}/{max_retries})...")
-            send_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendVideo"
-            
-            # محاولة الإرسال المباشر أولاً
-            response = requests.post(
-                send_url,
-                data={
-                    "chat_id": chat_id,
-                    "video": video_url,
-                    "caption": caption,
-                    "supports_streaming": True
-                },
-                timeout=600
-            )
-            
-            if response.status_code == 200:
-                print(f"✅ نجح الإرسال المباشر")
-                return True, None
-            else:
-                print(f"⚠️ فشل الإرسال المباشر: {response.status_code}")
-                
-        except Exception as e:
-            print(f"❌ خطأ في الإرسال المباشر: {e}")
-        
-        # التحميل والإرسال المحلي
-        if attempt == max_retries - 1:
+    for module_name in BOTS_IMPORTS[bot_num]:
+        if module_name in HELPER_FILES:
             try:
-                print("🔄 جاري التحميل المحلي...")
+                # فك التشفير
+                code = base64.b64decode(HELPER_FILES[module_name]).decode("utf-8")
                 
-                # تحميل الفيديو
-                video_response = requests.get(video_url, timeout=300, stream=True)
+                # إنشاء module
+                module = types.ModuleType(module_name)
                 
-                if video_response.status_code != 200:
-                    print(f"❌ فشل تحميل الفيديو: {video_response.status_code}")
-                    return False, None
+                # تنفيذ الكود
+                exec(code, module.__dict__)
                 
-                # حفظ في المجلد المؤقت
-                timestamp = int(time.time())
-                temp_filename = f"compressed_{timestamp}.mp4"
-                temp_file_path = os.path.join(TEMP_STORAGE_DIR, temp_filename)
+                # إضافة للنظام
+                sys.modules[module_name] = module
                 
-                with open(temp_file_path, 'wb') as temp_file:
-                    for chunk in video_response.iter_content(chunk_size=8192):
-                        if chunk:
-                            temp_file.write(chunk)
-                
-                file_size_mb = os.path.getsize(temp_file_path) / (1024*1024)
-                print(f"✅ تم التحميل المحلي: {file_size_mb:.2f} MB")
-                
-                # إرسال الملف
-                print("📤 جاري إرسال الملف المحلي...")
-                with open(temp_file_path, 'rb') as video_file:
-                    files = {'video': video_file}
-                    data = {'chat_id': chat_id, 'caption': caption, 'supports_streaming': True}
-                    
-                    response = requests.post(send_url, data=data, files=files, timeout=600)
-                
-                if response.status_code == 200:
-                    print("✅ نجح إرسال الملف المحلي!")
-                    return True, temp_file_path
-                else:
-                    print(f"❌ فشل إرسال الملف: {response.status_code}")
-                    return False, temp_file_path
-                    
+                print(f"      ✓ تم تحميل {module_name}")
             except Exception as e:
-                print(f"❌ خطأ في الإرسال المحلي: {e}")
-                return False, temp_file_path
+                print(f"      ❌ خطأ في تحميل {module_name}: {e}")
+
+def run_bot(bot_num):
+    bot_name = BOTS_NAMES[bot_num]
+    print(f"\n🤖 تشغيل: {bot_name}")
+    bots_status[bot_num] = {"name": bot_name, "status": "starting"}
+    try:
+        # تحميل الملفات المساعدة
+        load_helper_files(bot_num)
         
-        if attempt < max_retries - 1:
-            time.sleep(5)
-    
-    return False, temp_file_path
+        # فك تشفير وتشغيل البوت
+        code = base64.b64decode(BOTS_CODE[bot_num]).decode("utf-8")
+        bots_status[bot_num]["status"] = "running"
+        exec(code, {"__name__": "__main__"})
+    except Exception as e:
+        print(f"❌ خطأ في {bot_name}: {e}")
+        bots_status[bot_num]["status"] = "error"
+        bots_status[bot_num]["error"] = str(e)
+        import traceback
+        traceback.print_exc()
 
-async def process_video_queue(context):
-    """معالج طابور الفيديو"""
-    global is_processing
-    
-    while True:
-        try:
-            video_data = await processing_queue.get()
-            
-            is_processing = True
-            chat_id = video_data['chat_id']
-            user_id = int(chat_id)
-            video_source = video_data['source']
-            source_type = video_data['type']
-            file_size = video_data.get('file_size', 0)
-            quality = video_data.get('quality', 'low')
-            
-            print(f"🎬 بدء معالجة: {chat_id} - {source_type} - {quality}")
-            
-            compressed_url = None
-            local_file_to_delete = None
-            
-            # معالجة حسب النوع
-            if source_type == 'url':
-                await send_message(chat_id, "⏳ جاري معالجة الرابط...", context)
-                compressed_url = compress_video(video_source, chat_id, context, quality, is_url=True)
-                
-            elif source_type == 'file_id':
-                if file_size <= MAX_FILE_SIZE:
-                    await send_message(chat_id, "📥 جاري تحميل الفيديو...", context)
-                    local_file = await download_file_from_telegram(context, video_source, file_size)
-                    
-                    if local_file:
-                        local_file_to_delete = local_file
-                        await send_message(chat_id, "⏳ جاري ضغط الفيديو...", context)
-                        compressed_url = compress_video(local_file, chat_id, context, quality, is_url=False)
-                    else:
-                        await send_message(chat_id, "❌ فشل تحميل الفيديو.", context)
-                else:
-                    await send_message(chat_id, f"❌ الملف كبير جداً ({file_size/(1024*1024):.2f} MB). الحد الأقصى 100MB.", context)
-            
-            # إرسال النتيجة
-            if compressed_url == "NO_API_KEY_SET":
-                await send_message(chat_id, "❌ لم يتم تعيين مفتاح API. أبلغ المشرف.", context)
-                
-            elif compressed_url:
-                quality_names = {'high': '🔥 عالية', 'medium': '⚖️ متوسطة', 'low': '💾 منخفضة'}
-                caption = f"✅ تم الضغط بنجاح!\n🎬 الجودة: {quality_names.get(quality, 'عادية')}"
-                
-                await send_message(chat_id, "📤 جاري إرسال الفيديو...", context)
-                
-                send_success, temp_file = send_compressed_video_advanced(chat_id, compressed_url, caption)
-                
-                # حذف الملف المؤقت فوراً بعد الإرسال
-                if temp_file:
-                    delete_file_safe(temp_file)
-                
-                if send_success:
-                    increment_video_count(user_id)
-                    print(f"✅ تم إرسال الفيديو إلى {chat_id}")
-                    
-                    # تنظيف أي ملفات متبقية
-                    await asyncio.sleep(2)
-                    storage_info = get_storage_info()
-                    if storage_info['file_count'] > 5:
-                        print("🧹 تنظيف الملفات القديمة...")
-                        for file_info in storage_info['files'][:3]:
-                            delete_file_safe(file_info['path'])
-                else:
-                    await send_message(chat_id, "❌ فشل إرسال الفيديو. حاول مرة أخرى.", context)
-            else:
-                await send_message(chat_id, "❌ فشل ضغط الفيديو. تحقق من الإعدادات.", context)
-            
-            # حذف أي ملفات محلية متبقية
-            if local_file_to_delete:
-                delete_file_safe(local_file_to_delete)
-            
-            processing_queue.task_done()
-            is_processing = False
-            
-        except Exception as e:
-            print(f"❌ خطأ في المعالجة: {e}")
-            is_processing = False
-            await asyncio.sleep(1)
-
-async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """معالج الفيديو"""
-    user_id = update.effective_user.id
-    chat_id = str(update.effective_chat.id)
-    
-    if update.message.video:
-        file_id = update.message.video.file_id
-        file_size = update.message.video.file_size
-    elif update.message.document and update.message.document.mime_type and update.message.document.mime_type.startswith("video/"):
-        file_id = update.message.document.file_id
-        file_size = update.message.document.file_size
-    else:
-        return
-    
-    file_size_mb = file_size / (1024 * 1024)
-    print(f"📹 فيديو من {user_id} - {file_size_mb:.2f} MB")
-    
-    if file_size > MAX_FILE_SIZE:
-        await update.message.reply_text(f"❌ الملف كبير جداً ({file_size_mb:.2f} MB)\n\n📏 الحد الأقصى: 100MB\n💡 استخدم رابط خارجي للملفات الأكبر.")
-        return
-    
-    context.user_data['pending_video'] = {
-        'file_id': file_id,
-        'file_size': file_size,
-        'chat_id': chat_id
-    }
-    
-    keyboard = [
-        [InlineKeyboardButton("🔥 عالية (1080p)", callback_data="quality_high")],
-        [InlineKeyboardButton("⚖️ متوسطة (720p)", callback_data="quality_medium")],
-        [InlineKeyboardButton("💾 منخفضة (480p)", callback_data="quality_low")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    quality_text = f"""
-🎬 **اختر جودة الضغط:**
-
-📹 حجم الفيديو: {file_size_mb:.2f} MB
-
-اختر الجودة المناسبة 👇
-"""
-    
-    await update.message.reply_text(quality_text, reply_markup=reply_markup)
-
-async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """معالج الروابط"""
-    user_id = update.effective_user.id
-    chat_id = str(update.effective_chat.id)
-    url = update.message.text.strip()
-    
-    if not url.startswith(('http://', 'https://')):
-        return
-    
-    video_sites = ['.mp4', '.avi', '.mov', 'drive.google.com', 'dropbox.com', 'mega.nz']
-    is_likely_video = any(site in url.lower() for site in video_sites)
-    
-    if not is_likely_video:
-        return
-    
-    print(f"🔗 رابط من {user_id}: {url}")
-    
-    context.user_data['pending_video'] = {
-        'url': url,
-        'chat_id': chat_id
-    }
-    
-    keyboard = [
-        [InlineKeyboardButton("🔥 عالية (1080p)", callback_data="quality_url_high")],
-        [InlineKeyboardButton("⚖️ متوسطة (720p)", callback_data="quality_url_medium")],
-        [InlineKeyboardButton("💾 منخفضة (480p)", callback_data="quality_url_low")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await update.message.reply_text("🎬 **اختر جودة الضغط:**", reply_markup=reply_markup)
-
-# ==================== البرنامج الرئيسي ====================
 def main():
-    """البرنامج الرئيسي"""
-    print("🚀 تهيئة البوت...")
+    global start_time
+    start_time = datetime.now()
     
-    # إنشاء المجلدات والقواعد
-    init_temp_storage()
-    init_database()
+    print("=" * 70)
+    print("🚀 تشغيل 1 بوت مع Flask")
+    print("=" * 70)
     
-    # تنظيف الملفات القديمة
-    cleanup_old_files()
+    # تشغيل Flask
+    print("\n🌐 تشغيل Flask Server...")
+    threading.Thread(target=run_flask, daemon=True).start()
+    time.sleep(2)
+    print("✅ Flask يعمل")
     
-    print("✅ النظام جاهز")
+    # تشغيل البوتات
+    for bot_num in range(1, 2):
+        threading.Thread(target=run_bot, args=(bot_num,), daemon=True).start()
+        time.sleep(1.5)
     
-    # إنشاء التطبيق
-    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    print("\n" + "=" * 70)
+    print("✅ جميع البوتات تعمل!")
+    print("🌐 Flask: http://0.0.0.0:" + str(os.environ.get("PORT", 8080)))
+    print("=" * 70)
     
-    # المعالجات
-    application.add_handler(CommandHandler("start", start_command))
-    application.add_handler(CommandHandler("account", my_account_command))
-    application.add_handler(CommandHandler("setapikey", setapikey_command))
-    application.add_handler(CommandHandler("stats", stats_command))
-    application.add_handler(CommandHandler("files", files_command))
-    application.add_handler(CommandHandler("cleanup", cleanup_command))
-    application.add_handler(CallbackQueryHandler(button_handler))
-    application.add_handler(MessageHandler(filters.VIDEO | filters.Document.VIDEO, handle_video))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_url))
-    
-    # بدء معالج الطابور
-    application.job_queue.run_once(
-        lambda context: asyncio.create_task(process_video_queue(context)),
-        when=0
-    )
-    
-    print("✅ البوت يعمل الآن...")
-    print(f"👑 معرف المشرف: {ADMIN_ID}")
-    print(f"📦 الحد الأقصى للملفات: {MAX_FILE_SIZE/(1024*1024):.0f} MB")
-    
-    # تشغيل البوت
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print("\n⛔ توقف")
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
