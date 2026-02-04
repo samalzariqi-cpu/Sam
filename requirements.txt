@@ -1,6 +1,7 @@
 requests
 aiosqlite
 flask
+tqdm
 gdown
 gunicorn
 python-telegram-bot[job-queue]
