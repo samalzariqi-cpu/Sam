@@ -11,7 +11,6 @@ from flask import Flask, jsonify
 from datetime import datetime
 
 # Flask Application
-#app = Flask(name)
 app = Flask(__name__)
 
 # متغير لحفظ حالة البوتات
@@ -184,7 +183,7 @@ def load_helper_files(bot_num):
                 module = types.ModuleType(module_name)
                 
                 # تنفيذ الكود
-                exec(code, module.dict)
+                exec(code, module.__dict__)
                 
                 # إضافة للنظام
                 sys.modules[module_name] = module
@@ -204,7 +203,7 @@ def run_bot(bot_num):
         # فك تشفير وتشغيل البوت
         code = base64.b64decode(BOTS_CODE[bot_num]).decode("utf-8")
         bots_status[bot_num]["status"] = "running"
-        exec(code, {"name": "main"})
+        exec(code, {"__name__": "__main__"})
     except Exception as e:
         print(f"❌ خطأ في {bot_name}: {e}")
         bots_status[bot_num]["status"] = "error"
