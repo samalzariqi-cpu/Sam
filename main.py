@@ -11,7 +11,8 @@ from flask import Flask, jsonify
 from datetime import datetime
 
 # Flask Application
-app = Flask(name)
+#app = Flask(name)
+app = Flask(__name__)
 
 # متغير لحفظ حالة البوتات
 bots_status = {}
@@ -241,5 +242,5 @@ def main():
     except KeyboardInterrupt:
         print("\n⛔ توقف")
 
-if name == "main":
+if __name__ == "__main__":
     main()
