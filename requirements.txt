@@ -1,6 +1,7 @@
 requests
 aiosqlite
 flask
+psutil
 tqdm
 gdown
 gunicorn
